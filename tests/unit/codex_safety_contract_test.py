@@ -133,6 +133,38 @@ class SafetyContract(unittest.TestCase):
         self.invoke("careful", "Bash", {"command": "printf safe"}, None,
                     cwd=self.cwd / "git reset --hard")
 
+    def test_every_rm_target_and_command_must_be_safe(self):
+        for command in ("rm -rf node_modules /inert-important",
+                        "rm -fr /inert-important node_modules",
+                        "rm -rf node_modules; rm -rf /inert-important",
+                        "rm -rf node_modules && rm -rf /inert-important",
+                        "rm -rf node_modules/../../inert-important",
+                        'rm -rf "$HOME"/node_modules',
+                        "bash -c 'rm -rf /inert-important'",
+                        "rm --force --recursive /inert-important node_modules",
+                        "echo 'rm -r example'; rm -Rf /inert-important",
+                        "rm -r --force /inert-important",
+                        '"rm" -rf /inert-important',
+                        "r''m -rf /inert-important",
+                        "rm --rec --force /inert-important"):
+            with self.subTest(command=command):
+                self.invoke("careful", "Bash", {"command": command}, "ask")
+        (self.cwd / "node_modules").symlink_to(self.outside, target_is_directory=True)
+        self.invoke("careful", "Bash", {"command": "rm -rf node_modules/"}, "ask")
+
+    def test_literal_cleanup_and_quoted_examples_remain_allowed(self):
+        nested = self.cwd / "build" / "project"
+        nested.mkdir(parents=True)
+        for command in ("rm -rf .", "rm -rf src .git"):
+            self.invoke("careful", "Bash", {"command": command}, "ask", cwd=str(nested))
+        for command in ("rm -rf node_modules dist", "rm -fr ./node_modules",
+                        "rm --recursive --force -- node_modules",
+                        'echo "rm -rf /inert-important"',
+                        'rg "rm -rf /inert-important" source.sh',
+                        'git commit -m "fix rm -rf bug"'):
+            with self.subTest(command=command):
+                self.invoke("careful", "Bash", {"command": command}, None)
+
     def test_spaced_edit_write_and_escaped_paths(self):
         for tool in ("Edit", "Write"):
             for filename, expected in ((self.inside / 'new "file".txt', None),

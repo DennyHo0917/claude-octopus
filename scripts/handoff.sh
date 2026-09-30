@@ -42,7 +42,16 @@ if [[ "$action" == show ]]; then
 fi
 
 [[ ! -L "$file" && ( ! -e "$file" || -f "$file" ) ]] || { printf 'output must be a regular file: %s\n' "$file" >&2; exit 1; }
-session_file="${CLAUDE_PLUGIN_DATA:-${CLAUDE_OCTOPUS_WORKSPACE:-${HOME}/.claude-octopus}}/session.json"
+source "$SCRIPT_DIR/lib/session-state.sh" || exit 1
+PROJECT_ROOT="$project_root"
+if [[ -n "${OCTOPUS_SESSION_FILE:-}" ]] && ! octo_session_owned; then
+    printf 'Unable to validate handoff session ownership\n' >&2; exit 1
+fi
+session_rc=0
+session_file=$(octo_workflow_session_file "") || session_rc=$?
+if [[ "$session_rc" -gt 1 ]]; then
+    printf 'Unable to select a valid handoff session\n' >&2; exit 1
+fi
 session='{}'
 if [[ -f "$session_file" && ! -L "$session_file" ]]; then
     session="$(jq -c 'if type == "object" then . else {} end' "$session_file" 2>/dev/null)" || {

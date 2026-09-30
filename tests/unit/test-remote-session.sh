@@ -101,8 +101,10 @@ else
 fi
 
 tmp_home=$(mktemp -d)
-HOME="$tmp_home" CLAUDE_CODE_REMOTE=true OCTOPUS_REMOTE_SESSION=true OCTOPUS_AUTONOMY=supervised "$SESSION_START" >/dev/null 2>&1 || true
-if jq -e '.remote_session == true and .autonomy == "supervised"' "$tmp_home/.claude-octopus/session.json" >/dev/null 2>&1; then
+HOME="$tmp_home" PROJECT_ROOT="$tmp_home" CLAUDE_CODE_SESSION=remote-fixture CLAUDE_CODE_REMOTE=true OCTOPUS_REMOTE_SESSION=true OCTOPUS_AUTONOMY=supervised "$SESSION_START" >/dev/null 2>&1 || true
+host_file=$(HOME="$tmp_home" PROJECT_ROOT="$tmp_home" CLAUDE_CODE_SESSION=remote-fixture bash -c \
+    'source "$1"; octo_session_host_file' _ "$PROJECT_ROOT/scripts/lib/session-state.sh")
+if jq -e '.remote_session == true and .autonomy == "supervised"' "$host_file" >/dev/null 2>&1; then
     pass "explicit remote workflow preserves explicit autonomy"
 else
     fail "explicit remote workflow preserves explicit autonomy" "explicit remote state was not recorded"

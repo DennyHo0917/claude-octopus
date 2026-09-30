@@ -91,6 +91,7 @@ test_case "dispatcher passes protocol session identity to child hooks"
 fixture="$TEST_TMP_DIR/dispatch-root"
 mkdir -p "$fixture/hooks" "$fixture/scripts/lib"
 cp "$PROJECT_ROOT/scripts/lib/hook-activation.sh" "$fixture/scripts/lib/"
+cp "$PROJECT_ROOT/scripts/lib/session-state.sh" "$PROJECT_ROOT/scripts/lib/session-id.sh" "$fixture/scripts/lib/"
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s" "${CLAUDE_SESSION_ID:-missing}" > "$SESSION_CAPTURE"' > "$fixture/hooks/strategy-rotation.sh"
 capture="$TEST_TMP_DIR/session-id"
 env -u CLAUDE_SESSION_ID -u CLAUDE_CODE_SESSION_ID CLAUDE_PLUGIN_ROOT="$fixture" \

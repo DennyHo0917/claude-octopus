@@ -41,12 +41,23 @@ else
     fail "Has 80% AUTO_COMPACT threshold" "missing 80 check"
 fi
 
-# ── Reads session.json for workflow state ────────────────────────────
-
-if grep -q 'session.json' "$HOOK" 2>/dev/null; then
-    pass "Reads session.json for workflow state"
+# Use a real scoped run so this covers the reader rather than a filename.
+source "$SCRIPT_DIR/../helpers/workflow-session-fixture.sh"
+fixture="$TEST_TMP_DIR/context-workflow-$$"
+sid="context-workflow-$$"
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$fixture/project" \
+    "$fixture/home" "$fixture/workspace" "$sid")
+jq '.current_phase = "grasp"' "$state_file" > "$state_file.tmp"
+mv "$state_file.tmp" "$state_file"
+printf '{"used_pct":80}' > "/tmp/octopus-ctx-$sid.json"
+output=$(env HOME="$fixture/home" WORKSPACE_DIR="$fixture/workspace" \
+    PROJECT_ROOT="$fixture/project" CLAUDE_CODE_SESSION_ID="$sid" \
+    OCTOPUS_HOST=claude OCTOPUS_CONTEXT_AWARENESS=on bash "$HOOK" <<< '{}')
+rm -f "/tmp/octopus-ctx-$sid.json" "/tmp/octopus-ctx-debounce-$sid.count" "/tmp/octopus-ctx-severity-$sid.level"
+if [[ "$output" == *"Research phase active"* ]]; then
+    pass "Reads the owned workflow phase for context advice"
 else
-    fail "Reads session.json for workflow state" "missing session.json reference"
+    fail "Reads the owned workflow phase for context advice" "research advice absent"
 fi
 
 if grep -q 'current_phase' "$HOOK" 2>/dev/null; then

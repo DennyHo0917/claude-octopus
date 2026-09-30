@@ -812,7 +812,7 @@ probe_discover() {
 
     # v7.19.0 P2.3: Check cache for existing results
     local cache_key
-    cache_key=$(get_cache_key "$prompt")
+    cache_key=$(get_cache_key "$prompt") || cache_key=""
 
     if [[ "${OCTOPUS_RESEARCH_EVIDENCE:-true}" != "true" ]] && check_cache "$cache_key"; then
         echo -e "${CYAN}♻️  Using cached results from previous run${NC}"
@@ -5760,10 +5760,8 @@ ink_deliver() {
         if grep -q "Quality Gate: FAILED" "$tangle_results" 2>/dev/null; then
             log WARN "Development phase has failed quality gate. Proceeding with caution."
             checks_passed=false
+            retrospective_ceremony "$prompt" "Quality gate FAILED in tangle phase"
         fi
-
-        # v8.18.0: Run retrospective on quality gate failure
-        retrospective_ceremony "$prompt" "Quality gate FAILED in tangle phase"
     fi
 
     # Step 2: Synthesize final output
@@ -6238,36 +6236,17 @@ ${obs_ctx}"
     _write_embrace_session_state() {
         local phase="$1"
         local status="$2"
-        local session_dir="${HOME}/.claude-octopus"
-        local session_file="${HOME}/.claude-octopus/session.json"
-        local session_tmp=""
-        mkdir -p "$session_dir"
-        if command -v jq &> /dev/null; then
-            session_tmp=$(mktemp "${session_file}.tmp.XXXXXX") || return 0
-            if jq -n \
-                --arg phase "$phase" \
-                --arg status "$status" \
-                --arg workflow "embrace" \
-                --arg host_session_id "${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION:-}}}" \
-                --arg group "$task_group" \
-                --arg autonomy "$AUTONOMY_MODE" \
-                --argjson completed "$OCTOPUS_COMPLETED_PHASES" \
-                --argjson total "$OCTOPUS_TOTAL_PHASES" \
-                '{workflow: $workflow, host_session_id: $host_session_id, current_phase: $phase, phase_status: $status,
-                  task_group: $group, autonomy_mode: $autonomy,
-                  completed_phases: $completed, total_phases: $total,
-                  phase_map: {probe: "grasp", grasp: "tangle", tangle: "ink", ink: "complete"},
-                  phase_tasks: {total: 0, completed: 0},
-                  agent_queue: [],
-                  quality_gates: {passed: false, failed: false},
-                  updated_at: now | todate}' \
-                > "$session_tmp" 2>/dev/null &&
-               mv "$session_tmp" "$session_file" 2>/dev/null; then
-                :
-            else
-                rm -f "$session_tmp"
-            fi
-        fi
+        [[ -n "${SESSION_FILE:-}" ]] || return 0
+        octo_session_update \
+            '.current_phase = $phase | .phase = $phase | .phase_status = $status |
+             .task_group = $group | .autonomy_mode = $autonomy |
+             .completed_phases = $completed | .total_phases = $total |
+             .phase_map = {probe: "grasp", grasp: "tangle", tangle: "ink", ink: "complete"} |
+             .phase_tasks = {total: 0, completed: 0} | .agent_queue = [] |
+             .quality_gates = {passed: false, failed: false} | .updated_at = (now | todate)' \
+            --arg phase "$phase" --arg status "$status" --arg group "$task_group" \
+            --arg autonomy "$AUTONOMY_MODE" --argjson completed "$OCTOPUS_COMPLETED_PHASES" \
+            --argjson total "$OCTOPUS_TOTAL_PHASES"
     }
 
     _latest_embrace_output() {
@@ -6301,12 +6280,12 @@ ${obs_ctx}"
 
         _write_embrace_session_state "$phase" "failed"
         save_session_checkpoint "$phase" "failed" "$output"
+        interrupt_session || true
         handle_autonomy_checkpoint "$phase" "failed"
         _cleanup_embrace_exports
         return 1
     }
 
-    _write_embrace_session_state "init" "starting"
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -6320,8 +6299,9 @@ ${obs_ctx}"
         resume_from=$(get_resume_phase)
         log INFO "Resuming from phase: $resume_from"
     else
-        init_session "embrace" "$prompt"
+        init_session "embrace" "$prompt" || return 1
     fi
+    _write_embrace_session_state "${resume_from:-init}" "starting" || return 1
 
     # Cost transparency (v7.18.0 - P0.0)
     # Display estimated costs and require user approval BEFORE execution
@@ -6394,8 +6374,8 @@ ${obs_ctx}"
             # phase exports cannot reach this scope. It records the failed
             # phase in session.json before returning — read it from there.
             local _failed_phase=""
-            if command -v jq &>/dev/null && [[ -f "${HOME}/.claude-octopus/session.json" ]]; then
-                _failed_phase=$(jq -r '.current_phase // empty' "${HOME}/.claude-octopus/session.json" 2>/dev/null)
+            if command -v jq &>/dev/null && [[ -f "${SESSION_FILE:-}" ]]; then
+                _failed_phase=$(jq -r '.current_phase // empty' "${SESSION_FILE:-}" 2>/dev/null)
             fi
             _abort_embrace_phase "${_failed_phase:-unknown}" \
                 "YAML runtime failed" "$yaml_result"

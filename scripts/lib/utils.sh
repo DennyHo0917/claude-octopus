@@ -10,6 +10,8 @@ _utils_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_utils_lib_dir}/kimi-model-name.sh" || { echo "utils: failed to load kimi-model-name.sh" >&2; return 1 2>/dev/null || exit 1; }
 source "${_utils_lib_dir}/command-argv.sh" || { echo "utils: failed to load command-argv.sh" >&2; return 1 2>/dev/null || exit 1; }
 
+source "${_utils_lib_dir}/dispatch-value.sh" || { echo "utils: failed to load dispatch-value.sh" >&2; return 1 2>/dev/null || exit 1; }
+
 # Internal log helper — uses orchestrate.sh's log() if available, falls back to stderr
 _utils_log() {
     if type log &>/dev/null 2>&1; then
@@ -198,18 +200,6 @@ sanitize_review_id() {
     return 0
 }
 
-_octopus_is_safe_openai_compatible_value() {
-    local value="$1"
-    [[ -z "$value" ]] && return 1
-    [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]] && return 1
-    [[ "$value" == *"\\"* ]] && return 1
-    case "$value" in
-        *[[:space:]]*|*\*|*";"*|*"|"*|*"&"*|*'$'*|*'`'*|*"'"*|*'"'*|*"("*|*")"*|*"<"*|*">"*|*"!"*|*"*"*|*"?"*|*"["*|*"]"*|*"{"*|*"}"*)
-            return 1
-            ;;
-    esac
-    return 0
-}
 
 # Grok/Copilot/claude-sdk dispatch commands take the shape
 # `env OCTOPUS_<PROVIDER>_MODEL=<model> <shim path>` with nothing else — bind

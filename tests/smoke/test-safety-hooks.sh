@@ -70,10 +70,13 @@ test_careful_rm_rf_pattern() {
 }
 
 test_careful_safe_exceptions() {
-    test_case "careful-check.sh has safe rm -rf exceptions"
+    test_case "literal rm cleanup remains allowed in every supported directory"
     local missing=0
     for safe_dir in node_modules dist .next __pycache__ build coverage .turbo; do
-        if ! grep -c "$safe_dir" "$CAREFUL_HOOK" >/dev/null 2>&1; then
+        local decision
+        decision=$(printf '{"cwd":"%s","tool_input":{"command":"rm -rf %s"}}' \
+            "$TEST_TMP_DIR" "$safe_dir" | python3 "$PROJECT_ROOT/hooks/safety-contract.py" careful-rm)
+        if [[ "$decision" != allow ]]; then
             echo "  MISSING safe exception: $safe_dir"
             missing=$((missing + 1))
         fi

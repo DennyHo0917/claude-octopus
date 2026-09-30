@@ -538,6 +538,9 @@ ${YELLOW}Output:${NC}
 EOF
             ;;
         council)
+            if ! declare -F octo_council_default_providers >/dev/null 2>&1; then
+                source "${_usage_help_registry_dir}/provider-policy.sh" || return 1
+            fi
             cat << EOF
 ${YELLOW}council${NC} - Multi-LLM council advice and gated implementation
 
@@ -768,4 +771,62 @@ ${YELLOW}Environment:${NC}
 ${CYAN}https://github.com/nyldn/claude-octopus${NC}
 EOF
     exit 0
+}
+
+usage_simple() {
+    cat << EOF
+${MAGENTA}
+   ___  ___ _____  ___  ____  _   _ ___
+  / _ \/ __|_   _|/ _ \|  _ \| | | / __|
+ | (_) |__ \ | | | (_) | |_) | |_| \__ \\
+  \___/|___/ |_|  \___/|____/ \___/|___/
+${NC}
+${CYAN}Claude Octopus${NC} - Multi-agent AI orchestration made simple.
+
+${YELLOW}Quick Start:${NC}
+  ${GREEN}auto${NC} <prompt>           Let AI choose the best approach ${GREEN}(recommended)${NC}
+  ${GREEN}embrace${NC} <prompt>        Full 4-phase workflow (research → define → develop → deliver)
+  ${GREEN}setup${NC}                   Configure everything (run this first!)
+
+${YELLOW}Examples:${NC}
+  $(basename "$0") auto "build a login form with validation"
+  $(basename "$0") auto "research best practices for caching"
+  $(basename "$0") embrace "implement user authentication system"
+
+${YELLOW}Common Options:${NC}
+  -v, --verbose           Show detailed progress
+  --debug                 Enable debug logging (very verbose)
+  -n, --dry-run           Preview without executing
+  -Q, --quick             Use faster/cheaper models
+  -P, --premium           Use most capable models
+
+${YELLOW}Learn More:${NC}
+  $(basename "$0") help --full        Show all commands and options
+  $(basename "$0") help <command>     Get help for specific command
+
+${CYAN}https://github.com/nyldn/claude-octopus${NC}
+EOF
+    exit 0
+}
+
+usage() {
+    local show_full=false
+    local help_cmd=""
+
+    # Check for --full flag or command argument
+    for arg in "$@"; do
+        case "$arg" in
+            --full|-f) show_full=true ;;
+            -*) ;; # ignore other flags
+            *) help_cmd="$arg" ;;
+        esac
+    done
+
+    if [[ -n "$help_cmd" ]]; then
+        usage_command "$help_cmd"
+    elif [[ "$show_full" == "true" ]]; then
+        usage_full
+    else
+        usage_simple
+    fi
 }

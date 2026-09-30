@@ -5,6 +5,7 @@
 _OCTOPUS_HOOK_ACTIVATION_LOADED=true
 
 _octopus_hook_activation_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${_octopus_hook_activation_dir}/session-state.sh" || return 1
 
 octo_normalize_context_profile() {
     case "${1:-}" in
@@ -32,7 +33,7 @@ octo_hook_profile() {
 octo_hook_profile_allows() {
     local hook_id="${1:-}" profile config
     [[ -n "$hook_id" ]] || return 1
-    profile="$(octo_hook_profile)"
+    profile="${2:-$(octo_hook_profile)}"
     config="${OCTOPUS_HOOK_PROFILE_CONFIG:-${_octopus_hook_activation_dir}/../../config/hook-profiles.json}"
     [[ -r "$config" ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
@@ -41,46 +42,27 @@ octo_hook_profile_allows() {
 }
 
 octo_hook_session_id() {
-    local input="${1:-}" sid=""
-    sid="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
-
-    if [[ -z "$sid" && -n "$input" ]]; then
-        if [[ "$input" =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
-            sid="${BASH_REMATCH[1]}"
-        elif command -v jq >/dev/null 2>&1; then
-            sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
-        fi
-    fi
-
-    [[ -n "$sid" ]] || return 1
-    printf '%s\n' "$sid"
+    octo_resolve_session_id "" "${1:-}"
 }
 
 octo_hook_workflow_active() {
-    local input="${1:-}" state_file="${2:-${HOME}/.claude-octopus/session.json}"
-    local hook_session="" state_session="" state_status="" state_phase=""
-
+    local input="${1:-}" state_file="${2:-}" hook_session=""
     case "${OCTOPUS_ACTIVE_WORKFLOW:-}" in
         1|true|on|yes) return 0 ;;
     esac
-
+    if [[ -z "$state_file" ]]; then
+        state_file=$(octo_workflow_session_file "$input" 2>/dev/null) || return 1
+    fi
     [[ -r "$state_file" ]] || return 1
     command -v jq >/dev/null 2>&1 || return 1
-    jq -e 'type == "object"' "$state_file" >/dev/null 2>&1 || return 1
-
     hook_session="$(octo_hook_session_id "$input" 2>/dev/null || true)"
     [[ -n "$hook_session" ]] || return 1
-    state_session="$(jq -r '.host_session_id // empty' "$state_file" 2>/dev/null || true)"
-    [[ -n "$state_session" && "$state_session" == "$hook_session" ]] || return 1
-
-    state_status="$(jq -r '.status // .workflow_status // .phase_status // empty' "$state_file" 2>/dev/null || true)"
-    state_phase="$(jq -r '.current_phase // .phase // empty' "$state_file" 2>/dev/null || true)"
-    case "$state_status" in
-        in_progress|active|running|started) ;;
-        *) return 1 ;;
-    esac
-    case "$state_phase" in
-        complete|completed|finished|done) return 1 ;;
-    esac
-    return 0
+    # Validate and retrieve the relevant fields in one structured read.
+    jq -e --arg session "$hook_session" '
+        type == "object" and .host_session_id == $session and
+        ((.status // .workflow_status // .phase_status // "") as $status |
+         ["in_progress", "active", "running", "started"] | index($status) != null) and
+        ((.current_phase // .phase // "") as $phase |
+         ["complete", "completed", "finished", "done"] | index($phase) == null)
+    ' "$state_file" >/dev/null 2>&1
 }

@@ -16,7 +16,9 @@ _octo_hook_exit() { local c=$?; if [[ $c -ne 0 ]]; then echo "[hook:$(basename "
 trap _octo_hook_exit EXIT
 
 
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+_SESSION_INPUT=$(cat 2>/dev/null || true)
+octo_session_bind_hook "$_SESSION_INPUT" || exit 0
 METRICS_DIR="${HOME}/.claude-octopus/metrics"
 MEMORY_DIR="${HOME}/.claude/projects"
 

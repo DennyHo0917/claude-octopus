@@ -101,15 +101,11 @@ jq --arg phase "$current_phase" \
     .phases[$phase].gate.result = {passed: ($passed == "true"), completion_ratio: ($ratio | tonumber)}' \
    "$BRIDGE_LEDGER" > "$tmp" 2>/dev/null && mv "$tmp" "$BRIDGE_LEDGER" || rm -f "$tmp"
 
-# Update session.json if it exists
-session_file="${HOME}/.claude-octopus/session.json"
-if [[ -f "$session_file" ]]; then
-    tmp="${session_file}.tmp.$$"
-    jq --arg phase "$current_phase" \
-       --arg status "completed" \
-       --argjson completed "$completed_tasks" \
-       '.phase_status = $status | .phase_tasks.completed = $completed' \
-       "$session_file" > "$tmp" 2>/dev/null && mv "$tmp" "$session_file" || rm -f "$tmp"
+# A phase gate may update only its matching workflow run.
+if source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" &&
+   octo_session_bind_hook "$hook_input" && [[ -f "${SESSION_FILE:-}" ]]; then
+    octo_session_update '.phase_status = $status | .phase_tasks.completed = $completed' \
+        --arg status "completed" --argjson completed "$completed_tasks" || true
 fi
 
 if [[ "$gate_passed" == "true" ]]; then

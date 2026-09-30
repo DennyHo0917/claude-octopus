@@ -364,14 +364,7 @@ display_rich_progress() {
 
 # v7.19.0 P2.3: Result caching for probe workflows. Resolve at call time so
 # sourcing this library before WORKSPACE_DIR exists can never target /.cache.
-octo_probe_cache_dir() {
-    local workspace="${WORKSPACE_DIR:-}"
-    if [[ -z "$workspace" ]] && type resolve_octopus_workspace >/dev/null 2>&1; then
-        workspace="$(resolve_octopus_workspace 2>/dev/null || true)"
-    fi
-    [[ -n "$workspace" ]] || workspace="${HOME:-${TMPDIR:-/tmp}}/.claude-octopus"
-    printf '%s/.cache/probe-results\n' "${workspace%/}"
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/probe-cache-path.sh" || return 1
 
 CACHE_TTL="${CACHE_TTL:-3600}"  # 1 hour in seconds
 
@@ -408,6 +401,9 @@ generate_session_name() {
     echo "${workflow}: ${summary}"
 }
 
+_octo_session_source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${_octo_session_source_dir}/session-state.sh" || return 1
+
 # Initialize a new session
 init_session() {
     local workflow="$1"
@@ -416,24 +412,12 @@ init_session() {
     # v8.32.0: Check for mid-session config changes before starting workflow
     check_config_reload
 
-    # Claude Code v2.1.9: Use CLAUDE_SESSION_ID for cross-session tracking
-    local session_id
-    if [[ -n "$CLAUDE_CODE_SESSION" ]]; then
-        session_id="${workflow}-claude-${CLAUDE_CODE_SESSION}"
-    else
-        session_id="${workflow}-$(date +%Y%m%d-%H%M%S)"
-    fi
-
-    # v8.8: Generate human-readable session name for easier resume
-    local session_name
+    local session_id session_name host_session_id project_root
+    host_session_id=$(octo_resolve_session_id "standalone") || return 1
+    project_root=$(octo_session_project_root) || return 1
+    octo_session_new || return 1
+    session_id="${workflow}-${OCTOPUS_SESSION_RUN_ID}"
     session_name=$(generate_session_name "$workflow" "$prompt")
-
-    # v8.8: Auto-name session via claude rename (non-blocking, best-effort)
-    if [[ "$SUPPORTS_AUTH_CLI" == "true" ]] && [[ -n "$CLAUDE_CODE_SESSION" ]]; then
-        # Use /rename auto-naming by setting a meaningful name
-        claude --no-input --print "Session: ${session_name}" &>/dev/null &
-        log "DEBUG" "Auto-naming session: ${session_name}"
-    fi
 
     # Ensure jq is available for JSON manipulation
     if ! command -v jq &> /dev/null; then
@@ -454,12 +438,18 @@ init_session() {
     }
     if ! jq -n \
         --arg session_id "$session_id" \
-        --arg host_session_id "${CLAUDE_CODE_SESSION:-}" \
+        --arg host_session_id "$host_session_id" \
+        --arg run_id "$OCTOPUS_SESSION_RUN_ID" \
+        --arg project_root "$project_root" \
         --arg session_name "$session_name" \
         --arg workflow "$workflow" \
         --arg started_at "$started_at" \
         --arg prompt "$prompt" \
-        '{session_id: $session_id, host_session_id: $host_session_id, session_name: $session_name,
+        --argjson owner_pid "$$" \
+        --arg owner_start "$(octo_session_process_identity)" \
+        '{session_id: $session_id, run_id: $run_id, project_root: $project_root,
+          host_session_id: $host_session_id, session_name: $session_name,
+          owner_pid: $owner_pid, owner_start: $owner_start,
           workflow: $workflow, status: "in_progress", current_phase: null,
           started_at: $started_at, last_checkpoint: null,
           prompt: $prompt, phases: {}}' > "$session_tmp" 2>/dev/null; then
@@ -472,6 +462,8 @@ init_session() {
         log ERROR "Could not publish session state"
         return 1
     fi
+    _OCTOPUS_OWNS_SESSION=true
+    octo_session_publish_binding || return 1
     log INFO "Session initialized: $session_id (name: $session_name)"
 
     # v8.14.0: Initialize persistent state tracking
@@ -485,24 +477,16 @@ save_session_checkpoint() {
     local status="$2"
     local output_file="$3"
 
-    if [[ ! -f "$SESSION_FILE" ]] || ! command -v jq &> /dev/null; then
+    if [[ ! -f "${SESSION_FILE:-}" ]] || ! command -v jq &> /dev/null; then
         return 0
     fi
 
     local timestamp
     timestamp=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
 
-    local session_tmp=""
-    session_tmp=$(mktemp "${SESSION_FILE}.tmp.XXXXXX") || return 1
-    if ! jq --arg phase "$phase" \
-       --arg status "$status" \
-       --arg output "$output_file" \
-       --arg time "$timestamp" \
-       '.phases[$phase] = {status: $status, output: $output, timestamp: $time} | .last_checkpoint = $time | .current_phase = $phase' \
-       "$SESSION_FILE" > "$session_tmp" || ! mv "$session_tmp" "$SESSION_FILE"; then
-        rm -f "$session_tmp"
-        return 1
-    fi
+    octo_session_update \
+       '.phases[$phase] = ((.phases[$phase] // {}) + {status: $status, output: $output, timestamp: $time}) | .last_checkpoint = $time | .current_phase = $phase' \
+       --arg phase "$phase" --arg status "$status" --arg output "$output_file" --arg time "$timestamp" || return 1
 
     # v8.14.0: Sync to persistent state
     set_current_workflow "$(jq -r '.workflow // ""' "$SESSION_FILE" 2>/dev/null)" "$phase" 2>/dev/null || true
@@ -524,43 +508,38 @@ save_session_checkpoint() {
 
 # Check for resumable session
 check_resume_session() {
-    if [[ ! -f "$SESSION_FILE" ]] || ! command -v jq &> /dev/null; then
+    local candidate workflow phase
+    local cross_host=true
+    [[ "${CI_MODE:-false}" != true ]] || cross_host=false
+    candidate=$(octo_session_resume_file "$cross_host") || return 1
+    workflow=$(jq -r '.workflow' "$candidate") || return 1
+    phase=$(jq -r '.current_phase // "none"' "$candidate") || return 1
+    if [[ "${CI_MODE:-false}" == true ]]; then
+        log INFO "CI mode: Auto-declining session resume, starting fresh"
+        octo_session_recover abandon "$candidate" || return 1
         return 1
     fi
+    echo ""
+    echo -e "${YELLOW}${_BOX_TOP}${NC}"
+    echo -e "${YELLOW}║  Interrupted Session Found                                ║${NC}"
+    echo -e "${YELLOW}${_BOX_BOT}${NC}"
+    echo -e "Workflow: ${CYAN}$workflow${NC}"
+    echo -e "Last phase: ${CYAN}$phase${NC}"
+    echo ""
+    read -p "Resume from last checkpoint? (y/n) " -n 1 -r
+    echo ""
 
-    local status workflow phase
-    status=$(jq -r '.status' "$SESSION_FILE" 2>/dev/null)
-
-    if [[ "$status" == "in_progress" ]]; then
-        workflow=$(jq -r '.workflow' "$SESSION_FILE")
-        phase=$(jq -r '.current_phase // "none"' "$SESSION_FILE")
-
-        # Claude Code v2.1.9: CI mode auto-declines session resume
-        if [[ "$CI_MODE" == "true" ]]; then
-            log INFO "CI mode: Auto-declining session resume, starting fresh"
-            return 1
-        fi
-
-        echo ""
-        echo -e "${YELLOW}${_BOX_TOP}${NC}"
-        echo -e "${YELLOW}║  Interrupted Session Found                                ║${NC}"
-        echo -e "${YELLOW}${_BOX_BOT}${NC}"
-        echo -e "Workflow: ${CYAN}$workflow${NC}"
-        echo -e "Last phase: ${CYAN}$phase${NC}"
-        echo ""
-        read -p "Resume from last checkpoint? (y/n) " -n 1 -r
-        echo ""
-
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            return 0  # Resume
-        fi
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        octo_session_recover claim "$candidate"
+        return $?
     fi
-    return 1  # Start fresh
+    octo_session_recover abandon "$candidate" || return 1
+    return 1
 }
 
 # Get the phase to resume from
 get_resume_phase() {
-    if [[ -f "$SESSION_FILE" ]] && command -v jq &> /dev/null; then
+    if [[ -f "${SESSION_FILE:-}" ]] && command -v jq &> /dev/null; then
         jq -r '.current_phase // ""' "$SESSION_FILE"
     fi
 }
@@ -568,7 +547,7 @@ get_resume_phase() {
 # Get saved output file for a phase
 get_phase_output() {
     local phase="$1"
-    if [[ -f "$SESSION_FILE" ]] && command -v jq &> /dev/null; then
+    if [[ -f "${SESSION_FILE:-}" ]] && command -v jq &> /dev/null; then
         # Bind the phase as data, not as filter text. The previous form,
         # `jq -r ".phases.$phase.output"`, parsed a hyphenated name as
         # subtraction — `debate-probe` failed with `probe/0 is not defined` — so
@@ -608,18 +587,14 @@ save_phase_slot() {
     local value="$3"
 
     [[ -n "$phase" && -n "$key" ]] || return 0
-    if [[ ! -f "$SESSION_FILE" ]] || ! command -v jq &> /dev/null; then
+    if [[ ! -f "${SESSION_FILE:-}" ]] || ! command -v jq &> /dev/null; then
         return 0
     fi
 
-    local session_tmp=""
-    session_tmp=$(mktemp "${SESSION_FILE}.tmp.XXXXXX") || return 1
-    if ! jq --arg phase "$phase" --arg key "$key" --arg value "$value" \
+    octo_session_update \
        '.phases[$phase] //= {} | .phases[$phase].slots //= {} | .phases[$phase].slots[$key] = $value' \
-       "$SESSION_FILE" > "$session_tmp" || ! mv "$session_tmp" "$SESSION_FILE"; then
-        rm -f "$session_tmp"
-        return 1
-    fi
+       --arg phase "$phase" --arg key "$key" --arg value "$value"
+
 }
 
 get_phase_slot() {
@@ -627,7 +602,7 @@ get_phase_slot() {
     local key="$2"
 
     [[ -n "$phase" && -n "$key" ]] || return 0
-    if [[ -f "$SESSION_FILE" ]] && command -v jq &> /dev/null; then
+    if [[ -f "${SESSION_FILE:-}" ]] && command -v jq &> /dev/null; then
         jq -r --arg phase "$phase" --arg key "$key" \
            '.phases[$phase].slots[$key] // ""' "$SESSION_FILE"
     fi
@@ -638,7 +613,7 @@ get_phase_slot() {
 list_phase_slots() {
     local phase="$1"
     [[ -n "$phase" ]] || return 0
-    if [[ -f "$SESSION_FILE" ]] && command -v jq &> /dev/null; then
+    if [[ -f "${SESSION_FILE:-}" ]] && command -v jq &> /dev/null; then
         jq -r --arg phase "$phase" \
            '(.phases[$phase].slots // {}) | keys[]?' "$SESSION_FILE"
     fi
@@ -646,14 +621,8 @@ list_phase_slots() {
 
 # Mark session as complete
 complete_session() {
-    if [[ -f "$SESSION_FILE" ]] && command -v jq &> /dev/null; then
-        local session_tmp=""
-        session_tmp=$(mktemp "${SESSION_FILE}.tmp.XXXXXX") || return 1
-        if ! jq '.status = "completed"' "$SESSION_FILE" > "$session_tmp" ||
-           ! mv "$session_tmp" "$SESSION_FILE"; then
-            rm -f "$session_tmp"
-            return 1
-        fi
+    if [[ -f "${SESSION_FILE:-}" ]] && command -v jq &> /dev/null; then
+        octo_session_update '.status = "completed"' || return 1
         log INFO "Session marked complete"
     fi
 

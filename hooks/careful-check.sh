@@ -10,7 +10,16 @@ set -euo pipefail
 # the Claude Code harness error "No stderr output" can never recur. EXIT (not
 # ERR) avoids over-firing on intermediate `grep -o`/`cmd | ...` inside $() that
 # the hook's logic already handles. See issue #313.
-_octo_hook_exit() { local c=$?; if [[ $c -ne 0 ]]; then echo "[hook:$(basename "$0")] exit $c" >&2 2>/dev/null || true; fi; return 0; }
+_OCTO_CAREFUL_ACTIVE=false
+_octo_hook_exit() {
+    local c=$?
+    if [[ $c -ne 0 && "$_OCTO_CAREFUL_ACTIVE" == true ]]; then
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Careful mode could not finish validating this command. Repair the hook error before retrying."}}'
+        exit 0
+    fi
+    if [[ $c -ne 0 ]]; then echo "[hook:$(basename "$0")] exit $c" >&2 2>/dev/null || true; fi
+    return 0
+}
 trap _octo_hook_exit EXIT
 
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +47,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     : # pass-through — current hook schema treats silence as continue
     exit 0
 fi
+_OCTO_CAREFUL_ACTIVE=true
 
 _octo_invalid_input() {
     printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Careful mode could not validate the tool input. Check that Python 3 is installed and the hook input is valid JSON before retrying."}}'
@@ -57,21 +67,15 @@ CHECK_TEXT="$COMMAND"
 
 # ── Destructive pattern checks ────────────────────────────────────────
 
-# 1. rm -rf — but allow safe exceptions (node_modules, dist, .next, __pycache__, build, coverage, .turbo)
-if echo "$CHECK_TEXT" | grep -qE '(^|[^[:alnum:]_])rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-r\s+-f|-f\s+-r|--recursive\s+--force)'; then
-    # Check if the target is a safe exception
-    safe=false
-    for safe_dir in node_modules dist .next __pycache__ build coverage .turbo; do
-        if echo "$CHECK_TEXT" | grep -qE "rm\s+.*${safe_dir}(\s|$|/)"; then
-            safe=true
-            break
-        fi
-    done
-    if [[ "$safe" == "false" ]]; then
+# Only literal, single-command cleanup may exempt all checked rm operands.
+RM_DECISION=$(printf '%s' "$INPUT" | python3 "$_HOOK_DIR/safety-contract.py" careful-rm 2>/dev/null) || _octo_invalid_input
+case "$RM_DECISION" in
+    ask)
         _octo_careful_decision 'Destructive command detected: rm -rf. This recursively force-deletes files.'
-        exit 0
-    fi
-fi
+        exit 0 ;;
+    allow) ;;
+    *) _octo_invalid_input ;;
+esac
 
 # 2. SQL destructive operations. A SQL-looking string alone is not execution: source
 # searches and output commands routinely contain examples such as `DROP TABLE` and
@@ -91,7 +95,7 @@ _octo_direct_sql_pat="^[[:space:]]*(${_octo_sql_pat})"
 _octo_has_destructive_sql() {
     local drop_matches truncate_matches
     drop_matches=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_drop_pat" || true)
-    if [[ -n "$drop_matches" ]] && printf '%s\n' "$drop_matches" | awk '
+    if [[ -n "$drop_matches" ]] && awk '
         {
             if (NF < 3) next
             if (tolower($3) == "if") {
@@ -108,12 +112,12 @@ _octo_has_destructive_sql() {
             exit
         }
         END { exit(found ? 0 : 1) }
-    '; then
+    ' <<< "$drop_matches"; then
         return 0
     fi
     truncate_matches=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_truncate_pat" || true)
     [[ -n "$truncate_matches" ]] || return 1
-    printf '%s\n' "$truncate_matches" | awk '
+    awk '
         {
             raw = $2
             token = tolower(raw)
@@ -131,13 +135,13 @@ _octo_has_destructive_sql() {
             exit
         }
         END { exit(found ? 0 : 1) }
-    '
+    ' <<< "$truncate_matches"
 }
 
 if _octo_has_destructive_sql \
-    && { echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_client_pat" \
-        || echo "$CHECK_TEXT" | grep -qiE "$_octo_direct_sql_pat"; }; then
-    matched=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_sql_pat" | head -1)
+    && { grep -qiE "$_octo_sql_client_pat" <<< "$CHECK_TEXT" \
+        || grep -qiE "$_octo_direct_sql_pat" <<< "$CHECK_TEXT"; }; then
+    matched=$(grep -oiE "$_octo_sql_pat" <<< "$CHECK_TEXT" | sed -n '1p')
     _octo_careful_decision "Destructive SQL detected: ${matched}. This permanently destroys data."
     exit 0
 fi
@@ -146,13 +150,13 @@ fi
 # `-f` must be matched as a standalone flag token. The previous `.*-f` matched
 # any branch name containing "-f" (e.g. `git push origin release-final`), so
 # ordinary pushes were flagged as force pushes.
-if echo "$CHECK_TEXT" | grep -qE 'git\s+push\s+([^|;&]*\s)?(-[a-zA-Z]*f|--force(-with-lease)?(=[^ ]*)?)(\s|$)'; then
+if grep -qE 'git\s+push\s+([^|;&]*\s)?(-[a-zA-Z]*f|--force(-with-lease)?(=[^ ]*)?)(\s|$)' <<< "$CHECK_TEXT"; then
     _octo_careful_decision 'Destructive command detected: git push --force. This rewrites remote history and can cause data loss for collaborators.'
     exit 0
 fi
 
 # 4. git reset --hard
-if echo "$CHECK_TEXT" | grep -qE 'git\s+reset\s+--hard'; then
+if grep -qE 'git\s+reset\s+--hard' <<< "$CHECK_TEXT"; then
     _octo_careful_decision 'Destructive command detected: git reset --hard. This discards all uncommitted changes.'
     exit 0
 fi
@@ -163,20 +167,20 @@ fi
 # (`git checkout ./.gitignore`, `git restore ./.env`) — both discard one file, not all.
 # Allow shell-equivalent quoting and `--`, but require the dot path to end at a
 # shell boundary so dotfiles and `./subpaths` remain quiet.
-if echo "$CHECK_TEXT" | grep -qE "git\\s+(checkout|restore)\\s+(--\\s+)?[\"']?\\.(/)?[\"']?([[:space:];|&]|$)"; then
+if grep -qE "git\\s+(checkout|restore)\\s+(--\\s+)?[\"']?\\.(/)?[\"']?([[:space:];|&]|$)" <<< "$CHECK_TEXT"; then
     _octo_careful_decision 'Destructive command detected: git checkout/restore. This discards all unstaged changes.'
     exit 0
 fi
 
 # 6. kubectl delete
-if echo "$CHECK_TEXT" | grep -qE 'kubectl\s+delete'; then
+if grep -qE 'kubectl\s+delete' <<< "$CHECK_TEXT"; then
     _octo_careful_decision 'Destructive command detected: kubectl delete. This removes Kubernetes resources.'
     exit 0
 fi
 
 # 7. docker rm -f / docker system prune
-if echo "$CHECK_TEXT" | grep -qE 'docker\s+rm\s+-f|docker\s+system\s+prune'; then
-    matched=$(echo "$CHECK_TEXT" | grep -oE 'docker\s+(rm\s+-f|system\s+prune)' | head -1)
+if grep -qE 'docker\s+rm\s+-f|docker\s+system\s+prune' <<< "$CHECK_TEXT"; then
+    matched=$(grep -oE 'docker\s+(rm\s+-f|system\s+prune)' <<< "$CHECK_TEXT" | sed -n '1p')
     _octo_careful_decision "Destructive command detected: ${matched}. This forcefully removes Docker resources."
     exit 0
 fi

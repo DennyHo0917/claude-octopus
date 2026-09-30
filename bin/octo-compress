@@ -34,6 +34,7 @@ case "$MODE" in
         else
             filter="."
         fi
+        filter="${filter} | select(.additive != true)"
         if command -v jq &>/dev/null; then
             total_saved=$(jq -s "[.[] | ${filter}] | map(.saved) | add // 0" "$ANALYTICS_FILE" 2>/dev/null)
             total_events=$(jq -s "[.[] | ${filter}] | length" "$ANALYTICS_FILE" 2>/dev/null)

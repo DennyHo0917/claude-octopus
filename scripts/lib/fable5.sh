@@ -255,6 +255,22 @@ fable5_escalation_candidate() {
     esac
     [[ -z "${OCTOPUS_OPUS_MODEL:-}" && -z "${OCTOPUS_CLAUDE_MODEL:-}" &&
        -z "${CLAUDE_MODEL:-}" ]] || return 1
+    # User role/phase models stay pinned even when their value is an Opus
+    # model that would otherwise qualify for premium escalation.
+    local config_file="${OCTOPUS_PROVIDERS_CONFIG:-${HOME}/.claude-octopus/config/providers.json}"
+    if [[ -f "$config_file" ]] && jq -e --arg role "$role" --arg phase "$phase" '
+        def claude_model_route:
+            if type == "object" then
+                (.model // "") != "" and
+                ((.provider // "claude") | test("^claude($|[-:])"))
+            elif type == "string" then test("^claude[-:]")
+            else false end;
+        ((.overrides.claude // "") != "") or
+        (.routing.roles[$role] | claude_model_route) or
+        (.routing.phases[$phase] | claude_model_route)
+    ' "$config_file" >/dev/null 2>&1; then
+        return 1
+    fi
     if declare -f octo_frontier_policy_enabled >/dev/null 2>&1 &&
        octo_frontier_policy_enabled claude "$FABLE5_MODEL_ID"; then
         premium_frontier=true

@@ -26,19 +26,20 @@ SESSION_LIB="$PROJECT_ROOT/scripts/lib/session.sh"
 FIXTURE="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE"' EXIT
 
-# Extract only the slot functions. Sourcing session.sh wholesale runs top-level
-# code (check_resume_session carries a `read -p`), which hangs a test run.
+source "$SCRIPT_DIR/../helpers/workflow-session-fixture.sh"
 SLOTS="$FIXTURE/slots.sh"
 for fn in save_phase_slot get_phase_slot list_phase_slots; do
     sed -n "/^${fn}()/,/^}/p" "$SESSION_LIB" >> "$SLOTS"
 done
-
-printf '{"workflow":"research","phases":{}}\n' > "$FIXTURE/session.json"
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$FIXTURE/project" "$FIXTURE/home" "$FIXTURE/workspace" slots-test research)
+run_id=$(jq -r '.run_id' "$state_file")
 
 # Always returns 0: the framework sources `set -euo pipefail`, so a probing call
 # that legitimately fails would abort the suite before it could be reported.
 slot() {
-    { bash -c '
+    { env HOME="$FIXTURE/home" WORKSPACE_DIR="$FIXTURE/workspace" PROJECT_ROOT="$FIXTURE/project" \
+        CLAUDE_CODE_SESSION_ID=slots-test OCTOPUS_HOST=claude OCTOPUS_SESSION_FILE="$state_file" \
+        OCTOPUS_SESSION_RUN_ID="$run_id" bash -c '
         SESSION_FILE="$1"
         source "$2"
         case "$3" in
@@ -46,7 +47,7 @@ slot() {
             get)  get_phase_slot "$4" "$5" ;;
             list) list_phase_slots "$4" | tr "\n" " " ;;
         esac
-    ' _ "$FIXTURE/session.json" "$SLOTS" "$@" 2>/dev/null || true; }
+    ' _ "$state_file" "$SESSION_LIB" "$@" 2>/dev/null || true; }
 }
 
 test_case "the slot helpers were extracted"

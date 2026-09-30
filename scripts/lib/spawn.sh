@@ -840,7 +840,7 @@ ${heuristic_ctx}"
         local opus_tier
         opus_tier=$(get_agent_config "${curated_agent:-}" "tier" 2>/dev/null) || opus_tier="premium"
         local session_autonomy
-        session_autonomy=$(jq -r '.autonomy // "supervised"' "${HOME}/.claude-octopus/session.json" 2>/dev/null) || session_autonomy="supervised"
+        session_autonomy=$(jq -r '.autonomy // "supervised"' "${SESSION_FILE:-}" 2>/dev/null) || session_autonomy="supervised"
         local opus_mode
         opus_mode=$(select_opus_mode "$phase" "$opus_tier" "$session_autonomy")
         if [[ "$opus_mode" == "fast" ]]; then

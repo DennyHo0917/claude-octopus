@@ -333,186 +333,21 @@ verify_result_integrity() {
 # File locking, environment validation, dependency checks for progress tracking
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Atomic JSON update with file locking (prevents race conditions)
-# #559: reclaim a mkdir-lock whose holder died before releasing it (SIGKILL,
-# crash, OOM, power loss all skip the EXIT trap, leaving the lock dir behind and
-# blocking every later caller until timeout). A lock is stale when its recorded
-# holder PID is no longer running, its unknown owner outlives the age threshold,
-# or a nominally live PID persists past a larger hard limit (PID reuse).
-#
-# Reclaim is race-safe via grab-verify-restore: we atomically `mv` the lock
-# aside (only one contender can win that rename), then re-check the holder — if
-# it turns out to be alive (we grabbed a lock another reclaimer had just
-# re-created), we move it back untouched. Only a confirmed-stale holder is dropped.
-_atomic_lock_is_stale() {
-    local lockfile="$1" stale_age="$2"
-    [[ "$stale_age" =~ ^[1-9][0-9]*$ ]] || stale_age=30
-
-    local pid ts now age
-    pid=$(cat "$lockfile/pid" 2>/dev/null || true)
-    ts=$(cat "$lockfile/ts" 2>/dev/null || true)
-    if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
-        if stat -c %Y "$lockfile" >/dev/null 2>&1; then
-            ts=$(stat -c %Y "$lockfile" 2>/dev/null || true)
-        else
-            ts=$(stat -f %m "$lockfile" 2>/dev/null || true)
-        fi
-    fi
-    now=$(date +%s 2>/dev/null || echo 0)
-
-    if [[ "$pid" =~ ^[0-9]+$ ]]; then
-        kill -0 "$pid" 2>/dev/null || return 0
-        # A live PID is authoritative for normal lock lifetimes. Cap that
-        # trust at 10x stale_age so a recycled PID cannot wedge every writer.
-        if [[ "$ts" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && "$now" -ge "$ts" ]]; then
-            age=$((now - ts))
-            [[ "$age" -ge $((stale_age * 10)) ]] && return 0
-        fi
-        return 1
-    fi
-
-    if [[ "$ts" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && "$now" -ge "$ts" ]]; then
-        age=$((now - ts))
-        [[ "$age" -ge "$stale_age" ]] && return 0
-    fi
-    return 1
-}
-
-_atomic_reclaim_stale_lock() {
-    local lockfile="$1" stale_age="$2"
-    [[ -d "$lockfile" ]] || return 0
-    _atomic_lock_is_stale "$lockfile" "$stale_age" || return 0
-
-    local stolen="${lockfile}.stale.${BASHPID:-$$}"
-    mv "$lockfile" "$stolen" 2>/dev/null || return 0   # lost the race to reclaim
-    # We exclusively hold the moved dir. Re-verify it was actually stale before
-    # dropping it, in case we grabbed a lock another process had just re-created.
-    if _atomic_lock_is_stale "$stolen" "$stale_age"; then
-        rm -rf "$stolen" 2>/dev/null || true
-    else
-        mv "$stolen" "$lockfile" 2>/dev/null || true
-    fi
-}
-
-_atomic_release_owned_lock() {
-    local lockfile="$1" owner_token="$2" current_token
-    [[ -d "$lockfile" ]] || return 0
-    current_token=$(cat "$lockfile/token" 2>/dev/null || true)
-    [[ -n "$current_token" && "$current_token" == "$owner_token" ]] || return 0
-    rm -rf "$lockfile" 2>/dev/null || true
-}
-
-_atomic_reraise_signal() {
-    local signal="$1" owner_pid="$2" exit_code=1
-    case "$signal" in
-        INT) exit_code=130 ;;
-        TERM) exit_code=143 ;;
-    esac
-    trap - "$signal"
-    kill -s "$signal" "$owner_pid" 2>/dev/null || true
-    exit "$exit_code"
-}
-
-atomic_json_update() (
-    local json_file="$1"
-    local jq_expression="$2"
+# Use one stable, process-released lock for progress and routing settings too.
+atomic_json_update() {
+    local json_file="$1" expression="$2"
     shift 2
-
-    # Guard an empty path so "${json_file}.lock" can never become a bare ".lock"
-    # that rm -rf would target in the CWD.
     if [[ -z "$json_file" ]]; then
         log WARN "atomic_json_update: empty json_file"
         return 1
     fi
-
-    # mkdir is atomic on every POSIX filesystem, unlike a check-then-touch
-    # lock: two concurrent callers can never both succeed at creating the
-    # same directory, so this is a real mutex (see scripts/lib/events.sh
-    # _octo_event_lock for the same pattern). The lock is still a ".lock"
-    # path — it's just a directory now instead of a plain file.
-    local lockfile="${json_file}.lock"
-    local timeout="${OCTO_LOCK_WAIT_SECS:-5}"
-    local retry_ms="${OCTO_LOCK_RETRY_MILLIS:-100}"
-    local waited=0
-    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || timeout=5
-    [[ "$retry_ms" =~ ^[1-9][0-9]*$ ]] || retry_ms=100
-    local max_waits=$((timeout * 1000 / retry_ms))
-    [[ $max_waits -gt 0 ]] || max_waits=1
-    local retry_sleep
-    printf -v retry_sleep '%d.%03d' "$((retry_ms / 1000))" "$((retry_ms % 1000))"
-    local stale_age="${OCTO_LOCK_STALE_SECS:-30}"
-    [[ "$stale_age" =~ ^[1-9][0-9]*$ ]] || stale_age=30
-    local pending_signal=""
-    trap 'pending_signal=INT' INT
-    trap 'pending_signal=TERM' TERM
-
-    while ! mkdir "$lockfile" 2>/dev/null; do
-        case "$pending_signal" in
-            INT) exit 130 ;;
-            TERM) exit 143 ;;
-        esac
-        # #559: a leaked lock from a crashed holder would otherwise block forever.
-        _atomic_reclaim_stale_lock "$lockfile" "$stale_age"
-        case "$pending_signal" in
-            INT) exit 130 ;;
-            TERM) exit 143 ;;
-        esac
-        mkdir "$lockfile" 2>/dev/null && break
-        waited=$((waited + 1))
-        if [[ $waited -ge $max_waits ]]; then
-            log WARN "Timeout acquiring lock for $json_file"
-            return 1
-        fi
-        sleep "$retry_sleep"
-    done
-
-    # #559: record ownership so a later contender can tell a live holder from a
-    # crashed one. BASHPID does not exist on the supported macOS Bash 3.2; in
-    # that case a direct child reports its real parent (this function subshell)
-    # into the lock. Unlike $$, that value is not pinned to the top-level shell.
-    local owner_pid
-    if [[ -n "${BASHPID:-}" ]]; then
-        owner_pid="$BASHPID"
-        printf '%s\n' "$owner_pid" > "$lockfile/pid" 2>/dev/null || true
-    else
-        sh -c 'printf "%s\n" "$PPID"' > "$lockfile/pid" 2>/dev/null || true
-        owner_pid=$(cat "$lockfile/pid" 2>/dev/null || true)
-        [[ "$owner_pid" =~ ^[0-9]+$ ]] || owner_pid="$$"
+    if ! command -v python3 >/dev/null 2>&1; then
+        log WARN "atomic_json_update requires python3"
+        return 1
     fi
-    # The token keeps an old writer from releasing a successor.
-    local lock_token="${owner_pid}-$(date +%s)-${RANDOM:-0}"
-    date +%s > "$lockfile/ts" 2>/dev/null || true
-    printf '%s\n' "$lock_token" > "$lockfile/token" 2>/dev/null || true
-
-    local tmp_file="${json_file}.tmp.${owner_pid}"
-    # Run the whole critical section in this function's subshell, so these
-    # handlers never replace the caller's EXIT/INT/TERM traps. EXIT owns the
-    # idempotent cleanup; signal handlers clean, restore the default action,
-    # and re-raise so an interrupted update cannot continue successfully.
-    local lock_cleanup_cmd lock_int_cmd lock_term_cmd
-    printf -v lock_cleanup_cmd 'rm -f %q; _atomic_release_owned_lock %q %q' \
-        "$tmp_file" "$lockfile" "$lock_token"
-    printf -v lock_int_cmd '%s; _atomic_reraise_signal INT %q' \
-        "$lock_cleanup_cmd" "$owner_pid"
-    printf -v lock_term_cmd '%s; _atomic_reraise_signal TERM %q' \
-        "$lock_cleanup_cmd" "$owner_pid"
-    # shellcheck disable=SC2064 # Freeze subshell-local paths and token in each handler.
-    trap "$lock_cleanup_cmd" EXIT
-    # shellcheck disable=SC2064 # Freeze subshell-local paths, token, and PID.
-    trap "$lock_int_cmd" INT
-    # shellcheck disable=SC2064 # Freeze subshell-local paths, token, and PID.
-    trap "$lock_term_cmd" TERM
-    case "$pending_signal" in
-        INT) _atomic_reraise_signal INT "$owner_pid" ;;
-        TERM) _atomic_reraise_signal TERM "$owner_pid" ;;
-    esac
-
-    jq "$jq_expression" "$@" "$json_file" > "$tmp_file" && mv "$tmp_file" "$json_file"
-    local result=$?
-    [[ $result -ne 0 ]] && rm -f "$tmp_file"
-
-    return $result
-)
+    python3 "${_octopus_validation_lib_dir}/../helpers/json-update.py" \
+        "$json_file" '@json' '' '' "$expression" "$@"
+}
 
 # Validate Claude Code task integration features
 validate_claude_code_task_features() {

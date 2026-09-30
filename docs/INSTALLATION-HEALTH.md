@@ -3,6 +3,32 @@
 Claude Octopus can inspect its installation without contacting a model
 provider or changing a host-managed plugin cache.
 
+## Runtime prerequisites
+
+Workflow checkpoints, host preferences, progress updates and model settings
+require `python3` with the standard `fcntl` module and `jq`. These locks run
+on native Linux and macOS, and in WSL2 on Windows. Verify the local tools with:
+
+```bash
+python3 -c 'import fcntl'
+jq --version
+```
+
+JSON writers keep a small `.update.lock` file beside each record. Its presence
+does not mean a process holds the lock. The OS releases the lock when the
+writer exits, including after SIGKILL. Do not remove a lock file while writers
+are running. Reload older plugin sessions when changing versions, because
+older directory-lock writers cannot coordinate with this lock format.
+Checkpoints remain under the Octopus workspace and survive plugin updates.
+
+For changes to these writers, run their offline acceptance checks:
+
+```bash
+bash tests/unit/test-atomic-lock-recovery.sh
+bash tests/unit/test-hotpath-regressions.sh
+make ci-changed
+```
+
 ## Start with Doctor
 
 ```bash

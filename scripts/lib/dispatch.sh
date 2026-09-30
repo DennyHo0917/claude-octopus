@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 _profile_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_profile_lib_dir}/dispatch-value.sh" || { echo "dispatch: failed to load dispatch-value.sh" >&2; return 1 2>/dev/null || exit 1; }
 source "${_profile_lib_dir}/agent-spec.sh" 2>/dev/null || true
 source "${_profile_lib_dir}/provider-registry.sh" || { echo "dispatch: failed to load provider-registry.sh" >&2; return 1 2>/dev/null || exit 1; }
 if ! declare -f get_model_capability >/dev/null 2>&1; then
@@ -33,16 +34,7 @@ fi
 # Note: "API-key only" models require OPENAI_API_KEY; they are NOT available via ChatGPT subscription/OAuth.
 
 _octopus_is_safe_openai_compatible_dispatch_value() {
-    local value="$1"
-    [[ -z "$value" ]] && return 1
-    [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]] && return 1
-    [[ "$value" == *"\\"* ]] && return 1
-    case "$value" in
-        *[[:space:]]*|*\*|*";"*|*"|"*|*"&"*|*'$'*|*'`'*|*"'"*|*'"'*|*"("*|*")"*|*"<"*|*">"*|*"!"*|*"*"*|*"?"*|*"["*|*"]"*|*"{"*|*"}"*)
-            return 1
-            ;;
-    esac
-    return 0
+    _octopus_is_safe_openai_compatible_value "$@"
 }
 
 _octopus_is_safe_env_var_name() {
@@ -448,7 +440,7 @@ get_agent_command() {
                 opus_model_flag="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
                 _octopus_validate_exact_claude_dispatch_model "$opus_model_flag" "$role" "$agent_type" "$phase" "$prompt_bytes" || return 1
             else
-                opus_model_flag="$(opus_default_model)"
+                opus_model_flag="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
                 # Selective Fable 5 escalation for judgment-class roles, before
                 # the security reroute so a security dispatch can never end up
                 # on Fable even if the allowlist is later widened. Exact seats

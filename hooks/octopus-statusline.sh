@@ -64,7 +64,8 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if command -v jq &>/dev/null; then
-    SESSION_FILE="${HOME}/.claude-octopus/session.json"
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+    SESSION_FILE=$(octo_workflow_session_file "$input" || true)
 
     MODEL=$(echo "$input" | jq -r '.model.display_name // "Claude"')
     PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)

@@ -13,7 +13,11 @@ test_suite "session state resilience (#894)"
 sandbox="$(mktemp -d)"
 trap 'rm -rf "$sandbox"' EXIT
 mkdir -p "$sandbox/.claude-octopus/.octo" "$sandbox/plugin-data"
-printf '{"workflow":"embrace"}\n}\n' > "$sandbox/.claude-octopus/session.json"
+source "$SCRIPT_DIR/../helpers/workflow-session-fixture.sh"
+export CLAUDE_CODE_SESSION_ID=resilience-test OCTOPUS_HOST=claude
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$PROJECT_ROOT" "$sandbox" "$sandbox/plugin-data" resilience-test)
+export OCTOPUS_SESSION_FILE="$state_file" OCTOPUS_SESSION_RUN_ID="$(jq -r .run_id "$state_file")"
+printf '{"workflow":"embrace"}\n}\n' > "$state_file"
 
 state_reading_hooks=(
     session-end
@@ -43,8 +47,10 @@ for hook in "${state_reading_hooks[@]}"; do
 done
 
 test_case "workflow-verification.sh ignores a malformed compaction snapshot"
-rm -f "$sandbox/.claude-octopus/session.json"
-printf '{"workflow":"embrace"}\n}\n' > "$sandbox/.claude-octopus/.octo/pre-compact-snapshot.json"
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$PROJECT_ROOT" "$sandbox" "$sandbox/plugin-data" resilience-test)
+export OCTOPUS_SESSION_FILE="$state_file" OCTOPUS_SESSION_RUN_ID="$(jq -r .run_id "$state_file")"
+mkdir -p "$(dirname "$state_file")/.octo"
+printf '{"workflow":"embrace"}\n}\n' > "$(dirname "$state_file")/.octo/pre-compact-snapshot.json"
 snapshot_rc=0
 env HOME="$sandbox" \
     CLAUDE_PLUGIN_ROOT="$PROJECT_ROOT" \
@@ -58,8 +64,9 @@ else
 fi
 
 test_case "valid workflow state still triggers missing-dispatch verification"
-printf '{"workflow":"embrace"}\n' > "$sandbox/.claude-octopus/session.json"
-rm -f "$sandbox/.claude-octopus/.octo/pre-compact-snapshot.json"
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$PROJECT_ROOT" "$sandbox" "$sandbox/plugin-data" resilience-test)
+export OCTOPUS_SESSION_FILE="$state_file" OCTOPUS_SESSION_RUN_ID="$(jq -r .run_id "$state_file")"
+rm -f "$(dirname "$state_file")/.octo/pre-compact-snapshot.json"
 mkdir -p "$sandbox/.claude-octopus/results"
 valid_rc=0
 valid_output="$(env HOME="$sandbox" \
@@ -73,15 +80,15 @@ else
 fi
 
 test_case "TaskCompleted ignores a phase whose task ledger is not initialized"
-printf '{"phase":"probe","phase_tasks":{"total":0,"completed":0}}\n' \
-    > "$sandbox/.claude-octopus/session.json"
+jq '.phase = "probe" | .phase_tasks = {total: 0, completed: 0}' "$state_file" > "$sandbox/state-update.json"
+mv "$sandbox/state-update.json" "$state_file"
 zero_total_rc=0
 env HOME="$sandbox" \
     CLAUDE_PLUGIN_ROOT="$PROJECT_ROOT" \
     CLAUDE_PLUGIN_DATA="$sandbox/plugin-data" \
     bash "$PROJECT_ROOT/hooks/task-completed-transition.sh" </dev/null \
     >"$sandbox/zero-total.stdout" 2>"$sandbox/zero-total.stderr" || zero_total_rc=$?
-zero_total_completed="$(jq -r '.phase_tasks.completed' "$sandbox/.claude-octopus/session.json")"
+zero_total_completed="$(jq -r '.phase_tasks.completed' "$state_file")"
 if [[ "$zero_total_rc" -eq 0 && ! -s "$sandbox/zero-total.stderr" &&
       "$zero_total_completed" == "0" ]]; then
     test_pass
@@ -109,12 +116,11 @@ embrace_writer_source="$(awk '
     /^    _latest_embrace_output\(\)/ { capture=0 }
     capture
 ' "$PROJECT_ROOT/scripts/lib/workflows.sh")"
-if [[ "$embrace_writer_source" == *'mktemp "${session_file}.tmp.'* &&
-      "$embrace_writer_source" == *'mv "$session_tmp" "$session_file"'* &&
+if [[ "$embrace_writer_source" == *'octo_session_update'* &&
       "$embrace_writer_source" != *'> "$session_dir/session.json"'* ]]; then
     test_pass
 else
-    test_fail "Embrace state must render to a unique temporary file and rename it"
+    test_fail "Embrace state must use the owned atomic session updater"
 fi
 
 test_case "shared session writers never reuse a fixed temporary path"

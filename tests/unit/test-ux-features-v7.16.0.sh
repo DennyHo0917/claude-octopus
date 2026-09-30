@@ -70,7 +70,7 @@ else
 fi
 
 # Test 1.5: File locking implementation
-if grep -q "lockfile.*lock" "$ALL_SRC"; then
+if grep -q "fcntl.flock(lock, fcntl.LOCK_EX" "$PROJECT_ROOT/scripts/helpers/json-update.py"; then
     pass "File locking mechanism present"
 else
     fail "File locking mechanism missing"

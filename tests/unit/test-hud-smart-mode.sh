@@ -32,13 +32,20 @@ for hook in user-prompt-submit.sh subagent-result-capture.sh \
 done
 
 # Drain-only hooks should use plain cat (no timeout wrapper needed)
-for hook in context-awareness.sh budget-gate.sh; do
+for hook in budget-gate.sh; do
     if grep -q 'cat > /dev/null' "$HOOKS_DIR/$hook" 2>/dev/null; then
         pass "$hook drains stdin with plain cat"
     else
         fail "$hook drains stdin with plain cat" "still using timeout for drain"
     fi
 done
+
+if grep -q 'command -v timeout' "$HOOKS_DIR/context-awareness.sh" &&
+   grep -q 'INPUT=$(cat' "$HOOKS_DIR/context-awareness.sh"; then
+    pass "context-awareness reads event JSON with a portable timeout fallback"
+else
+    fail "context-awareness reads event JSON with a portable timeout fallback"
+fi
 
 # No hook should have bare 'timeout 3 cat' without the guard
 for hook in user-prompt-submit.sh subagent-result-capture.sh \
@@ -205,7 +212,9 @@ else
 fi
 
 # Context-awareness should exit when session ID is unknown (no unsafe /tmp glob)
-if grep -q 'SESSION.*unknown.*exit 0' "$HOOKS_DIR/context-awareness.sh" 2>/dev/null; then
+unknown_output=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_SESSION_ID -u CLAUDE_CODE_SESSION \
+    -u CODEX_SESSION_ID -u CODEX_TASK_ID bash "$HOOKS_DIR/context-awareness.sh" <<< '{}')
+if [[ -z "$unknown_output" ]]; then
     pass "Context-awareness exits when session ID unknown"
 else
     fail "Context-awareness exits when session ID unknown" "missing unknown session guard"

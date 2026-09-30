@@ -42,9 +42,9 @@ SESSION="${CLAUDE_SESSION_ID:-unknown}"
 DEBOUNCE_FILE="/tmp/octopus-compress-debounce-${SESSION}.count"
 count=0
 [[ -f "$DEBOUNCE_FILE" ]] && count=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
-count=$((count + 1))
+[[ "$count" =~ ^[0-9]{1,8}$ ]] || count=0
+count=$((10#$count + 1))
 echo "$count" > "$DEBOUNCE_FILE" 2>/dev/null || true
-[[ $((count % 3)) -eq 0 ]] || exit 0
 
 # --- Read stdin (tool output from CC hook protocol) ---
 OUTPUT=""
@@ -57,102 +57,141 @@ if [[ ! -t 0 ]]; then
 fi
 
 [[ -z "$OUTPUT" ]] && exit 0
+[[ $((count % 3)) -eq 0 ]] || exit 0
+
+# Decode the hook envelope. Raw input remains supported for standalone callers.
+command -v python3 >/dev/null 2>&1 || exit 0
+OUTPUT=$(printf '%s' "$OUTPUT" | python3 -c '
+import json, sys
+text = sys.stdin.read()
+try:
+    data = json.loads(text)
+except ValueError:
+    print(text, end="")
+    sys.exit(0)
+if not isinstance(data, dict) or "tool_response" not in data:
+    print(text, end="")
+    sys.exit(0)
+response = data["tool_response"]
+def extract(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(filter(None, (extract(item) for item in value)))
+    if isinstance(value, dict):
+        if isinstance(value.get("file"), dict):
+            return extract(value["file"])
+        return "\n".join(extract(value[key]) for key in
+                         ("stdout", "stderr", "content", "text", "output", "result")
+                         if key in value)
+    return ""
+print(extract(response), end="")
+') || exit 0
 
 # --- Size check ---
 char_count=${#OUTPUT}
-[[ $char_count -lt $MIN_CHARS ]] && exit 0
 
 # --- Load user config if present ---
 if [[ -f "$CONFIG_FILE" ]] && command -v jq &>/dev/null; then
-    _cfg_enabled=$(jq -r '.enabled // true' "$CONFIG_FILE" 2>/dev/null)
+    _cfg_enabled=$(jq -r 'if .enabled == false then false else true end' "$CONFIG_FILE" 2>/dev/null) || _cfg_enabled=true
     [[ "$_cfg_enabled" == "false" ]] && exit 0
-    _cfg_min=$(jq -r '.min_chars // empty' "$CONFIG_FILE" 2>/dev/null)
+    _cfg_min=$(jq -r '.min_chars // empty' "$CONFIG_FILE" 2>/dev/null) || _cfg_min=""
     [[ -n "$_cfg_min" ]] && MIN_CHARS="$_cfg_min"
-    [[ $char_count -lt $MIN_CHARS ]] && exit 0
 fi
+
+[[ "$MIN_CHARS" =~ ^[0-9]{1,8}$ ]] || MIN_CHARS=3000
+[[ "$MIN_ARRAY_ITEMS" =~ ^[0-9]{1,8}$ ]] || MIN_ARRAY_ITEMS=5
+MIN_ARRAY_ITEMS=$((10#$MIN_ARRAY_ITEMS))
+[[ $char_count -lt $((10#$MIN_CHARS)) ]] && exit 0
 
 # --- Content type detection ---
 content_type="text"
 compressed=""
-line_count=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+line_count=$(printf '%s\n' "$OUTPUT" | wc -l | tr -d ' ')
 
 # JSON array detection
 if command -v jq &>/dev/null; then
-    jq_type=$(echo "$OUTPUT" | jq -r 'type' 2>/dev/null || echo "")
+    jq_type=$(jq -r 'type' <<< "$OUTPUT" 2>/dev/null || echo "")
     if [[ "$jq_type" == "array" ]]; then
-        arr_len=$(echo "$OUTPUT" | jq 'length' 2>/dev/null || echo 0)
+        arr_len=$(jq 'length' <<< "$OUTPUT" 2>/dev/null || echo 0)
         if [[ $arr_len -gt $MIN_ARRAY_ITEMS ]]; then
             content_type="json_array"
             # Compress: first 2 + last 2 items + metadata
-            compressed=$(echo "$OUTPUT" | jq -c '{
+            compressed=$(jq -c '{
                 _octopus_compressed: true,
                 total_items: length,
                 sample_keys: (if length > 0 then (.[0] | keys? // []) else [] end),
                 first_items: .[:2],
                 last_items: .[-2:],
                 summary: "\(length) items total, showing first 2 and last 2"
-            }' 2>/dev/null || echo "")
+            }' <<< "$OUTPUT" 2>/dev/null || echo "")
         fi
     elif [[ "$jq_type" == "object" ]]; then
-        key_count=$(echo "$OUTPUT" | jq 'keys | length' 2>/dev/null || echo 0)
+        key_count=$(jq 'keys | length' <<< "$OUTPUT" 2>/dev/null || echo 0)
         if [[ $key_count -gt 20 ]]; then
             content_type="json_object"
-            compressed=$(echo "$OUTPUT" | jq -c '{
+            compressed=$(jq -c '{
                 _octopus_compressed: true,
                 total_keys: (keys | length),
                 keys: (keys[:15]),
                 summary: "\(keys | length) keys, showing first 15"
-            }' 2>/dev/null || echo "")
+            }' <<< "$OUTPUT" 2>/dev/null || echo "")
         fi
     fi
 fi
 
 # HTML detection
-if [[ "$content_type" == "text" ]] && echo "$OUTPUT" | head -5 | grep -qi '<html\|<!doctype'; then
+if [[ "$content_type" == "text" ]] && printf '%s\n' "$OUTPUT" | sed -n '1,5p' | grep -qi '<html\|<!doctype'; then
     content_type="html"
     # Strip tags, keep text content, truncate
-    stripped=$(echo "$OUTPUT" | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | head -30)
+    stripped=$(printf '%s\n' "$OUTPUT" | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | sed -n '1,30p')
     stripped_len=${#stripped}
-    compressed="[HTML content, ${char_count} chars → ${stripped_len} chars text extracted]\n${stripped}"
+    compressed="[HTML content, ${char_count} chars, ${stripped_len} chars text extracted]"$'\n'"${stripped}"
 fi
 
 # Log/verbose output detection (many lines with repeated patterns)
 if [[ "$content_type" == "text" && $line_count -gt 40 ]]; then
     # Check for timestamp patterns (common in logs)
-    ts_lines=$(echo "$OUTPUT" | head -20 | grep -cE '^\[?[0-9]{4}[-/][0-9]{2}|^[0-9]{2}:[0-9]{2}|^\w{3}\s+\d{1,2}') || ts_lines=0
+    ts_lines=$(printf '%s\n' "$OUTPUT" | sed -n '1,20p' | grep -cE '^\[?[0-9]{4}[-/][0-9]{2}|^[0-9]{2}:[0-9]{2}|^\w{3}\s+\d{1,2}') || ts_lines=0
     if [[ $ts_lines -gt 5 ]]; then
         content_type="logs"
     else
         content_type="verbose"
     fi
     # Head + tail compression for both logs and verbose output
-    head_lines=$(echo "$OUTPUT" | head -15)
-    tail_lines=$(echo "$OUTPUT" | tail -15)
+    head_lines=$(printf '%s\n' "$OUTPUT" | sed -n '1,15p')
+    tail_lines=$(printf '%s\n' "$OUTPUT" | tail -15)
     omitted=$((line_count - 30))
-    compressed="${head_lines}\n\n[... ${omitted} lines omitted (${content_type}, ${char_count} chars total) ...]\n\n${tail_lines}"
+    compressed="${head_lines}"$'\n\n'"[... ${omitted} lines omitted (${content_type}, ${char_count} chars total) ...]"$'\n\n'"${tail_lines}"
 fi
 
 # --- Skip if no compression produced ---
 [[ -z "$compressed" ]] && exit 0
 
-# Estimate token savings (rough: 1 token ≈ 4 chars)
+# Bound additive context even when sampled JSON items or individual lines are huge.
+compressed=$(printf '%s' "$compressed" | python3 -c '
+import sys
+text = sys.stdin.read()
+print(text if len(text) <= 350 else text[:155] + "\n[summary truncated]\n" + text[-155:], end="")
+')
 before_tokens=$((char_count / 4))
 after_tokens=$((${#compressed} / 4))
-saved_tokens=$((before_tokens - after_tokens))
-ratio=0
-[[ $before_tokens -gt 0 ]] && ratio=$(( (saved_tokens * 100) / before_tokens ))
 
-# --- Log analytics ---
-mkdir -p "$ANALYTICS_DIR"
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"session\":\"${SESSION}\",\"type\":\"${content_type}\",\"before\":${before_tokens},\"after\":${after_tokens},\"saved\":${saved_tokens},\"ratio\":${ratio}}" \
-    >> "$ANALYTICS_FILE" 2>/dev/null || true
+# These size estimates describe an additive summary, not removed context tokens.
+mkdir -p "$ANALYTICS_DIR" 2>/dev/null || true
+python3 - "$ANALYTICS_FILE" "$SESSION" "$content_type" "$before_tokens" "$after_tokens" <<'PYLOG' 2>/dev/null || true
+import datetime, json, sys
+path, session, kind, before, after = sys.argv[1:]
+record = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          "session": session, "type": kind, "additive": True,
+          "estimated_original_tokens": int(before), "estimated_summary_tokens": int(after), "added_tokens_estimate": int(after),
+          "estimate_method": "characters/4"}
+with open(path, "a") as stream:
+    stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+PYLOG
 
-# --- Output compressed summary as additionalContext ---
-# Escape for JSON output
-summary="[🐙] compressed ${content_type}: ~${before_tokens}→~${after_tokens} tokens (${ratio}% saved)"
-
-cat <<EOFJSON
-{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"${summary}"}}
-EOFJSON
-
-exit 0
+printf '%s' "$compressed" | python3 -c '
+import json, sys
+context = "[Tool summary, original output remains]\n" + sys.stdin.read()
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}}))
+'

@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 # shellcheck source=tests/helpers/test-framework.sh
 source "$SCRIPT_DIR/../helpers/test-framework.sh"
+source "$SCRIPT_DIR/../helpers/workflow-session-fixture.sh"
 
 test_suite "Install readiness and lightweight profiles"
 # Run hooks as a fresh process, not as the session that launched this suite.
@@ -212,12 +213,16 @@ fi
 test_case "core profile suppresses optional context reinforcement in a real hook run"
 hook_home="$TEST_TMP_DIR/hook-home"
 mkdir -p "$hook_home/.claude-octopus"
-printf '%s\n' '{"host_session_id":"hook-session","status":"active","current_phase":"develop"}' \
-    > "$hook_home/.claude-octopus/session.json"
+hook_project="$TEST_TMP_DIR/hook-project"
+hook_session=$(seed_workflow_session "$PROJECT_ROOT" "$hook_project" "$hook_home" "$hook_home/.claude-octopus" hook-session develop)
+jq '.current_phase = "develop"' "$hook_session" > "$hook_session.tmp"
+mv "$hook_session.tmp" "$hook_session"
 core_output="$(printf '%s' '{"session_id":"hook-session"}' | HOME="$hook_home" \
+    OCTOPUS_PROJECT_DIR="$hook_project" \
     CLAUDE_PLUGIN_ROOT="$PROJECT_ROOT" OCTOPUS_CONTEXT_PROFILE=core \
     bash "$PROJECT_ROOT/hooks/context-reinforcement.sh" 2>/dev/null || true)"
 workflow_output="$(printf '%s' '{"session_id":"hook-session"}' | HOME="$hook_home" \
+    OCTOPUS_PROJECT_DIR="$hook_project" \
     CLAUDE_PLUGIN_ROOT="$PROJECT_ROOT" OCTOPUS_CONTEXT_PROFILE=orchestration \
     bash "$PROJECT_ROOT/hooks/context-reinforcement.sh" 2>/dev/null || true)"
 if [[ -z "$core_output" ]] && jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' \
@@ -238,10 +243,11 @@ printf '%s\n' "$post_input" | HOME="$hook_home" CLAUDE_PLUGIN_ROOT="$PROJECT_ROO
     bash "$PROJECT_ROOT/hooks/post-tool-dispatch.sh" >/dev/null 2>&1 || true
 core_created=false
 [[ -e "$post_state" ]] && core_created=true
-printf '%s\n' "$(jq -cn --arg session "$post_session" \
-    '{host_session_id:$session,status:"active",current_phase:"develop"}')" \
-    > "$hook_home/.claude-octopus/session.json"
+post_run=$(seed_workflow_session "$PROJECT_ROOT" "$hook_project" "$hook_home" "$hook_home/.claude-octopus" "$post_session" develop)
+jq '.current_phase = "develop"' "$post_run" > "$post_run.tmp"
+mv "$post_run.tmp" "$post_run"
 printf '%s\n' "$post_input" | HOME="$hook_home" CLAUDE_PLUGIN_ROOT="$PROJECT_ROOT" \
+    OCTOPUS_PROJECT_DIR="$hook_project" \
     CLAUDE_SESSION_ID="$post_session" OCTOPUS_CONTEXT_PROFILE=orchestration \
     bash "$PROJECT_ROOT/hooks/post-tool-dispatch.sh" >/dev/null 2>&1 || true
 if [[ "$core_created" == false ]] &&
@@ -354,10 +360,13 @@ fi
 test_case "portable handoff export is structured, private, and redacted"
 handoff_home="$TEST_TMP_DIR/handoff-home"
 mkdir -p "$handoff_home/data"
-printf '%s\n' '{"workflow":"develop","current_phase":"build","status":"running","decisions":["OPENAI_API_KEY=do-not-export"]}' \
-    > "$handoff_home/data/session.json"
+handoff_session=$(seed_workflow_session "$PROJECT_ROOT" "$PROJECT_ROOT" "$handoff_home" "$handoff_home/data" handoff-fixture develop)
+jq '.current_phase="build" | .decisions=["OPENAI_API_KEY=do-not-export"]' \
+    "$handoff_session" > "$handoff_session.tmp"
+mv "$handoff_session.tmp" "$handoff_session"
 handoff_file="$TEST_TMP_DIR/portable-handoff.json"
 handoff_json="$(HOME="$handoff_home" CLAUDE_PLUGIN_DATA="$handoff_home/data" \
+    CLAUDE_CODE_SESSION_ID=handoff-fixture OCTOPUS_HOST=claude \
     OCTOPUS_PROJECT_DIR="$PROJECT_ROOT" "$HANDOFF" export --json --out "$handoff_file" \
     2>/dev/null || true)"
 mode="$(portable_file_mode "$handoff_file" || true)"
@@ -394,9 +403,11 @@ HOME="$handoff_home" "$HANDOFF" export --out "$handoff_out" >/dev/null 2>&1 || h
 if [[ "$handoff_rc" -ne 0 ]]; then test_pass; else test_fail "directory destination was accepted"; fi
 
 test_case "handoff validates summary field types and redacts every exported string"
-printf '%s\n' '{"workflow":{"token":"private-value"},"status":"token=private-status","decisions":"unexpected","blockers":[{"token":"private-object"}]}' \
-    > "$handoff_home/data/session.json"
+jq '.workflow={"token":"private-value"} | .status="token=private-status" | .decisions="unexpected" | .blockers=[{"token":"private-object"}]' \
+    "$handoff_session" > "$handoff_session.tmp"
+mv "$handoff_session.tmp" "$handoff_session"
 handoff_json="$(HOME="$handoff_home" CLAUDE_PLUGIN_DATA="$handoff_home/data" \
+    CLAUDE_CODE_SESSION_ID=handoff-fixture OCTOPUS_HOST=claude \
     "$HANDOFF" export --json 2>/dev/null || true)"
 if jq -e '.workflow == "none" and .decisions == [] and .blockers == [] and
     (tostring | contains("private-") | not)' <<<"$handoff_json" >/dev/null 2>&1; then

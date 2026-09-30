@@ -209,7 +209,7 @@ CURRENT_BRANCH=""         # Tracks current branch for session recovery
 DISABLE_PERSONAS="${CLAUDE_OCTOPUS_DISABLE_PERSONAS:-false}"
 
 # Session recovery
-SESSION_FILE="${WORKSPACE_DIR}/session.json"
+SESSION_FILE="${OCTOPUS_SESSION_FILE:-}"
 
 # v8.18.0 Feature: Sentinel Work Monitor
 # GitHub-aware work monitor that triages issues/PRs/CI failures

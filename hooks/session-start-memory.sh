@@ -26,23 +26,14 @@ if [[ -r "$LIFECYCLE_LIB" ]]; then
     fi
 fi
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
 SESSION_INPUT=""
 if [[ ! -t 0 ]]; then
     SESSION_INPUT="$(cat 2>/dev/null || true)"
 fi
 
-_publish_session_state() {
-    local destination="$1"
-    shift
-    local state_tmp=""
-    state_tmp=$(mktemp "${destination}.tmp.XXXXXX") || return 1
-    if "$@" > "$state_tmp" 2>/dev/null &&
-       mv "$state_tmp" "$destination" 2>/dev/null; then
-        return 0
-    fi
-    rm -f "$state_tmp"
-    return 1
-}
+# Bind host preferences to the same project and session as prompt tracking.
+octo_session_bind_hook "$SESSION_INPUT" || true
 
 REMOTE_SESSION=false
 # Remote hosting alone is not consent to autonomous Octopus behavior. Hosted
@@ -53,24 +44,12 @@ if [[ "${OCTOPUS_REMOTE_SESSION:-false}" == "true" ]]; then
     export CLAUDE_OCTOPUS_AUTONOMY="${CLAUDE_OCTOPUS_AUTONOMY:-${OCTOPUS_AUTONOMY:-autonomous}}"
     export OCTOPUS_AUTONOMY="${OCTOPUS_AUTONOMY:-$CLAUDE_OCTOPUS_AUTONOMY}"
 
-    if mkdir -p "${HOME}/.claude-octopus" 2>/dev/null; then
-        SESSION_FILE="${HOME}/.claude-octopus/session.json"
-        if command -v jq >/dev/null 2>&1; then
-            if [[ -f "$SESSION_FILE" ]]; then
-                _publish_session_state "$SESSION_FILE" jq --arg autonomy "$OCTOPUS_AUTONOMY" \
-                    '.remote_session = true | .autonomy = (.autonomy // $autonomy)' \
-                    "$SESSION_FILE" || true
-            else
-                _publish_session_state "$SESSION_FILE" jq -n \
-                    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                    --arg autonomy "$OCTOPUS_AUTONOMY" \
-                    --arg host_session_id "${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}" \
-                    '{"remote_session": true, "autonomy": $autonomy, "session_start": $ts, "host_session_id": $host_session_id}' || true
-            fi
-        elif [[ ! -f "$SESSION_FILE" ]]; then
-            _publish_session_state "$SESSION_FILE" printf \
-                '{"remote_session":true,"autonomy":"%s"}\n' "$OCTOPUS_AUTONOMY" || true
-        fi
+    if command -v jq >/dev/null 2>&1; then
+        octo_host_session_update \
+            '.remote_session = true | .autonomy = (.autonomy // $autonomy) |
+             .session_start = (.session_start // $ts)' \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg autonomy "$OCTOPUS_AUTONOMY" >/dev/null 2>&1 || true
     fi
 fi
 
@@ -105,7 +84,7 @@ fi
 # --- 0b. Session sync (merged from session-sync.sh to reduce hook spawns) ---
 export CLAUDE_OCTOPUS_SESSION_ID="${CLAUDE_SESSION_ID:-}"
 
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+SESSION_FILE="$(octo_session_host_file "$SESSION_INPUT")"
 MEMORY_DIR="${HOME}/.claude/projects"
 
 # --- 1. Find and read persisted preferences from auto-memory ---
@@ -150,20 +129,12 @@ done < "$PREFS_FILE"
 
 # --- 3. Apply preferences to current session ---
 if [[ -n "$AUTONOMY" ]] && command -v jq &>/dev/null; then
-    mkdir -p "$(dirname "$SESSION_FILE")"
-
-    if [[ -f "$SESSION_FILE" ]]; then
-        _publish_session_state "$SESSION_FILE" jq --arg autonomy "$AUTONOMY" \
-           --arg providers "${PROVIDERS:-}" \
-           '.autonomy = $autonomy | .restored_from_memory = true | if $providers != "" then .providers = $providers else . end' \
-           "$SESSION_FILE" || true
-    else
-        # Create initial session with restored preferences (jq --arg for safe escaping)
-        _publish_session_state "$SESSION_FILE" jq -n \
-            --arg autonomy "$AUTONOMY" \
-            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{"autonomy": $autonomy, "restored_from_memory": true, "session_start": $ts}' || true
-    fi
+    octo_host_session_update \
+        '.autonomy = $autonomy | .restored_from_memory = true |
+         .session_start = (.session_start // $ts) |
+         if $providers != "" then .providers = $providers else . end' \
+        --arg autonomy "$AUTONOMY" --arg providers "${PROVIDERS:-}" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
 
     echo "[🐙] restored: autonomy=${AUTONOMY}"
 fi

@@ -111,23 +111,33 @@ do
     fi
 done
 if [[ -z "$_router_override" && "$_router_setting_present" == "false" ]]; then
-    case "$INPUT" in
-        *'"prompt":"/octo:'*|*'"prompt": "/octo:'*|*'"prompt":"octo:'*|*'"prompt": "octo:'*) ;;
-        *) exit 0 ;;
-    esac
+    # A broad marker check may parse an unrelated mention, but cannot skip a
+    # supported explicit invocation because JSON whitespace or case changed.
+    shopt -s nocasematch
+    case "$INPUT" in *octo:*|*'\u'*) ;; *) exit 0 ;; esac
+    shopt -u nocasematch
 fi
 
-# Extract the user's prompt text (python3 preferred, jq fallback)
+# Parse explicit input once, carrying its session ID into title handling.
 if command -v python3 &>/dev/null; then
-    PROMPT=$(printf '%s' "$INPUT" | python3 -c "
-import sys, json
+    _PROMPT_FIELDS=$(printf '%s' "$INPUT" | python3 -c "
+import sys, json, re
 d = json.load(sys.stdin)
-print(d.get('prompt', d.get('message', '')))" 2>/dev/null) || true
+sid = d.get('session_id', '')
+prompt = d.get('prompt') or d.get('message', '')
+print(sid if isinstance(sid, str) and re.fullmatch(r'[A-Za-z0-9._-]+', sid) else '')
+print(prompt if isinstance(prompt, str) else '')" 2>/dev/null) || true
 elif command -v jq &>/dev/null; then
-    PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // .message // ""' 2>/dev/null) || true
+    _PROMPT_FIELDS=$(jq -r '
+        (.session_id // "" | if type == "string" and test("^[A-Za-z0-9._-]+$") then . else "" end),
+        (.prompt // .message // "" | if type == "string" then . else "" end)
+    ' <<< "$INPUT" 2>/dev/null) || true
 else
     exit 0
 fi
+[[ "$_PROMPT_FIELDS" == *$'\n'* ]] || exit 0
+_INPUT_SESSION_ID="${_PROMPT_FIELDS%%$'\n'*}"
+PROMPT="${_PROMPT_FIELDS#*$'\n'}"
 
 [[ -z "$PROMPT" ]] && exit 0
 
@@ -145,6 +155,7 @@ esac
 # ═══════════════════════════════════════════════════════════════════════════════
 # GUARD: Skip if user already invoked an /octo: command (prevent double-exec)
 # ═══════════════════════════════════════════════════════════════════════════════
+PROMPT="$PROMPT_HEAD"
 PROMPT_LOWER=$(printf '%s' "$PROMPT" | tr '[:upper:]' '[:lower:]')
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
 OCTO_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$HOOK_DIR/.." && pwd 2>/dev/null || echo ".")}"
@@ -259,7 +270,10 @@ if [[ "$PROMPT_LOWER" == /octo:* ]] || [[ "$PROMPT_LOWER" == "octo:"* ]]; then
 
     if [[ "${OCTOPUS_AUTO_TITLE:-true}" != "false" ]]; then
         if [[ -n "$_CMD" ]]; then
-            _SESSION_ID=$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+            source "$OCTO_PLUGIN_ROOT/scripts/lib/session-id.sh"
+            _SESSION_ID=$(octo_resolve_session_id "$_INPUT_SESSION_ID" "" || true)
+            # No stable identity means there is no safe per-session title marker.
+            [[ -n "$_SESSION_ID" && "$_SESSION_ID" != *[!A-Za-z0-9._-]* ]] || exit 0
             _TITLE_FILE="${HOME}/.claude-octopus/.session-titled-${_SESSION_ID:-unknown}"
             if [[ ! -f "$_TITLE_FILE" ]]; then
                 touch "$_TITLE_FILE" 2>/dev/null || true
@@ -416,12 +430,14 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 # SESSION TRACKING — detect repeat intent for weak-signal auto-invoke
 # ═══════════════════════════════════════════════════════════════════════════════
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+source "$OCTO_PLUGIN_ROOT/scripts/lib/session-state.sh" || exit 0
+octo_session_bind_hook "$INPUT" || SESSION_FILE=""
 REPEAT_INTENT=false
 
-if [[ -n "$INTENT" && -f "$SESSION_FILE" ]] && command -v jq &>/dev/null; then
+if [[ -n "$INTENT" && -n "$SESSION_FILE" ]] && command -v jq &>/dev/null; then
+    _INTENT_FILE=$(octo_session_host_file "$INPUT" 2>/dev/null || true)
     # Check if same intent was detected previously in this session
-    PREV_INTENT=$(jq -r '.detected_intent // ""' "$SESSION_FILE" 2>/dev/null) || true
+    PREV_INTENT=$(jq -r '.detected_intent // ""' "$_INTENT_FILE" 2>/dev/null) || true
     [[ "$PREV_INTENT" == "$INTENT" ]] && REPEAT_INTENT=true
 
     # Provider pre-warming
@@ -439,14 +455,10 @@ if $_opencode: p.append('opencode')
 print(json.dumps(p))
 " 2>/dev/null) || PRIMED='["claude"]'
 
-    # Update session state
-    TMP=""
-    if TMP=$(mktemp "${SESSION_FILE}.tmp.XXXXXX"); then
-        jq --arg intent "$INTENT" --arg conf "$CONFIDENCE" --argjson providers "$PRIMED" \
-            '.detected_intent = $intent | .intent_confidence = $conf | .primed_providers = $providers' \
-            "$SESSION_FILE" > "$TMP" 2>/dev/null && \
-            mv "$TMP" "$SESSION_FILE" 2>/dev/null || rm -f "$TMP"
-    fi
+    octo_host_session_update \
+        '.detected_intent = $intent | .intent_confidence = $conf | .primed_providers = $providers' \
+        --arg intent "$INTENT" --arg conf "$CONFIDENCE" --argjson providers "$PRIMED" || true
+
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════

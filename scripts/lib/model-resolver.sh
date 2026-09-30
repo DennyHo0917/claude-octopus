@@ -388,16 +388,22 @@ resolve_octopus_model() {
     else
         env_var="OCTOPUS_$(echo "$canonical_provider" | tr '[:lower:]' '[:upper:]' | tr '-' '_')_MODEL"
     fi
-    if [[ -n "${!env_var:-}" ]]; then
-        if ! validate_model_name_for_provider "$canonical_provider" "${!env_var}"; then
+    local seat_override="${!env_var:-}"
+    if [[ "$canonical_provider" == claude && "$agent_type" == claude-opus* && -n "${OCTOPUS_OPUS_MODEL:-}" ]]; then
+        seat_override="$OCTOPUS_OPUS_MODEL"
+    elif [[ -z "$seat_override" && "$canonical_provider" == claude ]]; then
+        seat_override="${CLAUDE_MODEL:-}"
+    fi
+    if [[ -n "$seat_override" ]]; then
+        if ! validate_model_name_for_provider "$canonical_provider" "$seat_override"; then
             log ERROR "Invalid model name in $env_var"
             return 1
         fi
         # v9.51: Fable 5 security reroute applies to explicit env pins too.
         if declare -f fable5_maybe_reroute >/dev/null 2>&1; then
-            fable5_maybe_reroute "${!env_var}" "$role" "$agent_type" "$phase"
+            fable5_maybe_reroute "$seat_override" "$role" "$agent_type" "$phase"
         else
-            echo "${!env_var}"
+            echo "$seat_override"
         fi
         return 0
     fi
@@ -421,7 +427,9 @@ resolve_octopus_model() {
         safe_cfg="$(cksum < "$config_file" 2>/dev/null | awk '{print $1 "_" $2}')"
         safe_cfg="${safe_cfg//[^a-zA-Z0-9_]/_}"
     fi
-    cache_key="MC_${safe_p}_A_${safe_a}_P_${safe_ph}_R_${safe_r}_M_${safe_cm}_RP_${safe_rp}_TC_${safe_tc}_C_${safe_cfg}"
+    local safe_caps="${SUPPORTS_OPUS_5_5:-}_${SUPPORTS_OPUS_5:-}_${SUPPORTS_OPUS_4_8:-}_${SUPPORTS_OPUS_4_7:-}_${SUPPORTS_SONNET_5:-}"
+    safe_caps="${safe_caps//[^a-zA-Z0-9_]/_}"
+    cache_key="MC_${safe_p}_A_${safe_a}_P_${safe_ph}_R_${safe_r}_M_${safe_cm}_RP_${safe_rp}_TC_${safe_tc}_C_${safe_cfg}_CAP_${safe_caps}"
     local cached_val
     eval "cached_val=\"\${_OCTO_MODEL_CACHE_${cache_key}:-}\""
     if [[ -n "$cached_val" ]]; then

@@ -34,7 +34,20 @@ test_mcp_has_post_flags_param() {
 
 test_mcp_args_include_post_flags() {
     test_case "MCP args array includes postFlags after command"
-    if grep -q '\.\.\.postFlags, prompt' "$MCP_SRC"; then test_pass; else test_fail "missing postFlags in args"; fi
+    if node --input-type=module - "$PROJECT_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+const root = process.argv[2];
+const { runOrchestrate } = await import(pathToFileURL(root + "/mcp-server/dist/index.js"));
+let argumentsSent;
+await runOrchestrate("grapple", "test-prompt", root, ["-q", "80"],
+  ["--domain", "security"], async (file, args) => {
+    argumentsSent = args;
+    return { stdout: "fixture", stderr: "" };
+  });
+assert.deepEqual(argumentsSent, ["-q", "80", "grapple", "--domain", "security", "test-prompt"]);
+JS
+    then test_pass; else test_fail "MCP changed provider flag order"; fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════

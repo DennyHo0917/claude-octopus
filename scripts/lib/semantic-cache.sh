@@ -24,36 +24,25 @@ OCTOPUS_SEMANTIC_CACHE="${OCTOPUS_SEMANTIC_CACHE:-false}"
 OCTOPUS_CACHE_SIMILARITY_THRESHOLD="${OCTOPUS_CACHE_SIMILARITY_THRESHOLD:-0.7}"
 CACHE_TTL="${CACHE_TTL:-3600}"
 
-# session.sh normally owns this helper. Keep semantic-cache.sh independently
-# sourceable for focused tests and third-party integrations.
-if ! type octo_probe_cache_dir >/dev/null 2>&1; then
-    octo_probe_cache_dir() {
-        local workspace="${WORKSPACE_DIR:-}"
-        if [[ -z "$workspace" ]] && type resolve_octopus_workspace >/dev/null 2>&1; then
-            workspace="$(resolve_octopus_workspace 2>/dev/null || true)"
-        fi
-        [[ -n "$workspace" ]] || workspace="${HOME:-${TMPDIR:-/tmp}}/.claude-octopus"
-        printf '%s/.cache/probe-results\n' "${workspace%/}"
-    }
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/probe-cache-path.sh" || return 1
 
 check_cache_semantic() {
     local prompt="$1"
     local cache_dir
+    [[ "$OCTOPUS_SEMANTIC_CACHE" == "true" ]] || return 1
     cache_dir="$(octo_probe_cache_dir)" || return 1
-
-    [[ "$OCTOPUS_SEMANTIC_CACHE" != "true" ]] && return 1
     [[ ! -d "$cache_dir" ]] && return 1
 
     # Try exact match first
     local cache_key
-    cache_key=$(echo "$prompt" | shasum -a 256 | awk '{print $1}')
+    cache_key=$(get_cache_key "$prompt") || return 1
     if check_cache "$cache_key" 2>/dev/null; then
         echo "$cache_key"
         return 0
     fi
 
     # Scan bigram files for fuzzy matches
+    local best_prompt=""
     local best_key=""
     local best_sim="0"
     for bigram_file in "${cache_dir}"/*.bigrams; do
@@ -68,13 +57,14 @@ check_cache_semantic() {
 
         if awk -v s="$sim" -v t="$OCTOPUS_CACHE_SIMILARITY_THRESHOLD" -v b="$best_sim" \
            'BEGIN { exit !(s >= t && s > b) }'; then
+            best_prompt="$cached_prompt"
             best_sim="$sim"
             best_key="${bigram_file%.bigrams}"
             best_key="${best_key##*/}"
         fi
     done
 
-    if [[ -n "$best_key" ]] && check_cache "$best_key" >/dev/null 2>&1; then
+    if [[ -n "$best_key" && "$(get_cache_key "$best_prompt")" == "$best_key" ]] && check_cache "$best_key" >/dev/null 2>&1; then
         log "DEBUG" "Semantic cache hit: similarity=$best_sim for key=$best_key"
         echo "$best_key"
         return 0
@@ -85,6 +75,7 @@ check_cache_semantic() {
 
 save_to_cache_semantic() {
     local cache_key="$1"
+    [[ "$cache_key" =~ ^[a-f0-9]{64}$ ]] || return 1
     local result_file="$2"
     local prompt="$3"
 
@@ -144,12 +135,16 @@ deduplicate_results() {
 
 get_cache_key() {
     local prompt="$1"
-    echo -n "$prompt" | shasum -a 256 | cut -d' ' -f1
+    local identity
+    identity=$(octo_probe_cache_identity) || return 1
+    printf '%s\0%s' "$identity" "$prompt" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
 }
 
 # Check if cached result exists and is fresh
 check_cache() {
+    octo_probe_cache_identity eligible || return 1
     local cache_key="$1"
+    [[ "$cache_key" =~ ^[a-f0-9]{64}$ ]] || return 1
     local cache_dir cache_file cache_meta
     cache_dir="$(octo_probe_cache_dir)" || return 1
     cache_file="${cache_dir}/${cache_key}.md"
@@ -164,9 +159,10 @@ check_cache() {
     cache_time=$(cat "$cache_meta" 2>/dev/null || echo "0")
     local current_time age
     current_time=$(date +%s)
-    age=$((current_time - cache_time))
+    [[ "$cache_time" =~ ^[0-9]{1,10}$ ]] || return 1
+    age=$((current_time - 10#$cache_time))
 
-    if [[ $age -lt $CACHE_TTL ]]; then
+    if [[ $age -ge 0 && $age -lt $CACHE_TTL ]]; then
         log "INFO" "Cache hit! Age: ${age}s (TTL: ${CACHE_TTL}s)"
         return 0
     else
@@ -177,7 +173,9 @@ check_cache() {
 
 # Get cached result
 get_cached_result() {
+    octo_probe_cache_identity eligible || return 1
     local cache_key="$1"
+    [[ "$cache_key" =~ ^[a-f0-9]{64}$ ]] || return 1
     local cache_dir cache_file
     cache_dir="$(octo_probe_cache_dir)" || return 1
     cache_file="${cache_dir}/${cache_key}.md"
@@ -186,7 +184,9 @@ get_cached_result() {
 
 # Save result to cache
 save_to_cache() {
+    octo_probe_cache_identity eligible || return 1
     local cache_key="$1"
+    [[ "$cache_key" =~ ^[a-f0-9]{64}$ ]] || return 1
     local result_file="$2"
     local cache_dir cache_file cache_meta cache_tmp meta_tmp
     cache_dir="$(octo_probe_cache_dir)" || return 1
@@ -229,12 +229,14 @@ cleanup_cache() {
     current_time=$(date +%s)
     local cleaned=0
 
-    for meta_file in "$cache_dir"/*.meta; do
+    # Prune expired entries across source/configuration namespaces.
+    for meta_file in "${cache_dir%/*}"/*/*.meta; do
         [[ ! -f "$meta_file" ]] && continue
 
         local cache_time
         cache_time=$(cat "$meta_file" 2>/dev/null || echo "0")
-        local age=$((current_time - cache_time))
+        [[ "$cache_time" =~ ^[0-9]{1,10}$ ]] || continue
+        local age=$((current_time - 10#$cache_time))
 
         if [[ $age -gt $CACHE_TTL ]]; then
             local base="${meta_file%.meta}"

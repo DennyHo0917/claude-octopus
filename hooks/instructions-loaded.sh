@@ -18,7 +18,9 @@ _octo_hook_exit() { local c=$?; if [[ $c -ne 0 ]]; then echo "[hook:$(basename "
 trap _octo_hook_exit EXIT
 
 
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+_SESSION_INPUT=$(cat 2>/dev/null || true)
+octo_session_bind_hook "$_SESSION_INPUT" || exit 0
 RESULTS_DIR="${HOME}/.claude-octopus/results"
 
 # No session file — nothing to inject
@@ -45,7 +47,7 @@ EFFORT=$(jq -r '.effort_level // empty' "$SESSION_FILE" 2>/dev/null)
 
 # v8.41.0: Check for pre-compact snapshot (written by PreCompact hook before compaction)
 # If session.json has no phase but a snapshot exists, restore from snapshot
-SNAPSHOT_FILE="${HOME}/.claude-octopus/.octo/pre-compact-snapshot.json"
+SNAPSHOT_FILE="$(dirname "$SESSION_FILE")/.octo/pre-compact-snapshot.json"
 if [[ -z "$PHASE" || "$PHASE" == "null" ]] && [[ -f "$SNAPSHOT_FILE" ]] &&
    jq -e 'type == "object"' "$SNAPSHOT_FILE" >/dev/null 2>&1; then
     PHASE=$(jq -r '.phase // empty' "$SNAPSHOT_FILE" 2>/dev/null)

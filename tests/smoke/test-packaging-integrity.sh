@@ -310,9 +310,12 @@ test_orchestrate_can_source_deps() {
     script_dir=$(dirname "$ORCHESTRATE")
     while IFS= read -r line; do
         # Extract the path from 'source "$SCRIPT_DIR/lib/foo.sh" 2>/dev/null || true' etc.
-        # Strip 'source ', quotes, and any trailing redirects/error handling
+        # Read the quoted source argument, leaving redirects and guards aside.
         local src_path
-        src_path=$(echo "$line" | sed 's/^source //' | sed 's/"//g' | sed 's/ *2>.*//' | sed "s|\\\$SCRIPT_DIR|$script_dir|g" | sed "s|\${SCRIPT_DIR}|$script_dir|g")
+        src_path="${line#source \"}"
+        src_path="${src_path%%\"*}"
+        src_path="${src_path//\$\{SCRIPT_DIR\}/$script_dir}"
+        src_path="${src_path//\$SCRIPT_DIR/$script_dir}"
         if [[ ! -f "$src_path" ]]; then
             result="FAIL: $line (resolved to $src_path)"
             break

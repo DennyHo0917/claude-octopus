@@ -244,6 +244,12 @@ $prompt" 60 "code-reviewer" "auto-route" 2>/dev/null) || true
     # ═══════════════════════════════════════════════════════════════════════════
     # DOUBLE DIAMOND WORKFLOW ROUTING
     # ═══════════════════════════════════════════════════════════════════════════
+    if [[ "$task_type" == diamond-* && "${DRY_RUN:-false}" != true ]] &&
+       declare -F octo_session_owned >/dev/null 2>&1 &&
+       ! octo_session_owned "${SESSION_FILE:-}"; then
+        init_session "${task_type#diamond-}" "$prompt" || return 1
+        _octo_standalone_session=true
+    fi
     case "$task_type" in
         diamond-discover)
             echo -e "${CYAN}${_BOX_TOP}${NC}"

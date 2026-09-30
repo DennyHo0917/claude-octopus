@@ -8,7 +8,8 @@ set -euo pipefail
 [[ "${OCTOPUS_PROVIDER_CHILD:-false}" == "true" ]] && exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd -P)/session-state.sh" || exit 0
+SESSION_FILE=$(octo_workflow_session_file "" || true)
 STATE_FILE=".octo/STATE.md"
 SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
 WORKSPACE_DIR="${CLAUDE_PLUGIN_DATA:-${OCTOPUS_WORKSPACE:-${HOME}/.claude-octopus}}"

@@ -333,23 +333,12 @@ execute_workflow_phase() {
     local skipped_outputs=()
     local done_dir="${WORKSPACE_DIR:-${HOME}/.claude-octopus}/.octo/agents"
 
-    # Update session state for hooks
-    local session_dir="${HOME}/.claude-octopus"
-    mkdir -p "$session_dir"
-
-    # Count total agents for this phase
+    # Task ledgers belong to the carried run and update under its lock.
     local total_agents
     total_agents=$(echo "$agents_raw" | wc -l | tr -d ' ')
-
-    # Write phase task info for task-completed-transition.sh
-    if command -v jq &>/dev/null && [[ -f "$session_dir/session.json" ]]; then
-        local phase_tasks_tmp=""
-        if phase_tasks_tmp=$(mktemp "$session_dir/session.json.tmp.XXXXXX"); then
-            jq --argjson total "$total_agents" \
-           '.phase_tasks = {total: $total, completed: 0}' \
-           "$session_dir/session.json" > "$phase_tasks_tmp" \
-           && mv "$phase_tasks_tmp" "$session_dir/session.json" 2>/dev/null || rm -f "$phase_tasks_tmp"
-        fi
+    if declare -f octo_session_update >/dev/null 2>&1 && [[ -f "${SESSION_FILE:-}" ]]; then
+        octo_session_update '.phase_tasks = {total: $total, completed: 0}' \
+            --argjson total "$total_agents" || return 1
     fi
 
     # Spawn agents
@@ -692,17 +681,9 @@ run_yaml_workflow() {
         export OCTOPUS_WORKFLOW_PHASE="$phase_name"
         export OCTOPUS_COMPLETED_PHASES=$((phase_num - 1))
 
-        # Update session.json for hooks
-        local session_dir="${HOME}/.claude-octopus"
-        if command -v jq &>/dev/null && [[ -f "$session_dir/session.json" ]]; then
-            local phase_start_tmp=""
-            if phase_start_tmp=$(mktemp "$session_dir/session.json.tmp.XXXXXX"); then
-                jq --arg phase "$phase_name" --arg status "running" \
-               --argjson completed "$((phase_num - 1))" \
-               '.current_phase = $phase | .phase_status = $status | .completed_phases = $completed' \
-               "$session_dir/session.json" > "$phase_start_tmp" \
-               && mv "$phase_start_tmp" "$session_dir/session.json" 2>/dev/null || rm -f "$phase_start_tmp"
-            fi
+        if declare -f octo_session_update >/dev/null 2>&1 && [[ -f "${SESSION_FILE:-}" ]]; then
+            octo_session_update '.current_phase = $phase | .phase = $phase | .phase_status = $status | .completed_phases = $completed' \
+                --arg phase "$phase_name" --arg status "running" --argjson completed "$((phase_num - 1))" || return 1
         fi
 
         # Read previous phase output if available
@@ -718,15 +699,9 @@ run_yaml_workflow() {
         local phase_result
         if ! phase_result=$(execute_workflow_phase "$yaml_file" "$phase_name" "$prompt" "$prev_content" "$task_group"); then
             log "ERROR" "YAML Runtime: Halting workflow '$workflow_name' — phase '$phase_name' failed its quality gate"
-            if command -v jq &>/dev/null && [[ -f "$session_dir/session.json" ]]; then
-                local phase_failed_tmp=""
-                if phase_failed_tmp=$(mktemp "$session_dir/session.json.tmp.XXXXXX"); then
-                    jq --arg phase "$phase_name" --arg status "failed" \
-                   '.current_phase = $phase | .phase_status = $status |
-                    .quality_gates = {passed: false, failed: true}' \
-                   "$session_dir/session.json" > "$phase_failed_tmp" \
-                   && mv "$phase_failed_tmp" "$session_dir/session.json" 2>/dev/null || rm -f "$phase_failed_tmp"
-                fi
+            if declare -f octo_session_update >/dev/null 2>&1 && [[ -f "${SESSION_FILE:-}" ]]; then
+                octo_session_update '.current_phase = $phase | .phase = $phase | .phase_status = $status | .quality_gates = {passed: false, failed: true}' \
+                    --arg phase "$phase_name" --arg status "failed" || true
             fi
             return 1
         fi
@@ -734,16 +709,9 @@ run_yaml_workflow() {
         previous_output="$phase_result"
         all_outputs+=("$phase_result")
 
-        # Update session state
-        if command -v jq &>/dev/null && [[ -f "$session_dir/session.json" ]]; then
-            local phase_complete_tmp=""
-            if phase_complete_tmp=$(mktemp "$session_dir/session.json.tmp.XXXXXX"); then
-                jq --arg phase "$phase_name" --arg status "completed" \
-               --argjson completed "$phase_num" \
-               '.current_phase = $phase | .phase_status = $status | .completed_phases = $completed' \
-               "$session_dir/session.json" > "$phase_complete_tmp" \
-               && mv "$phase_complete_tmp" "$session_dir/session.json" 2>/dev/null || rm -f "$phase_complete_tmp"
-            fi
+        if declare -f octo_session_update >/dev/null 2>&1 && [[ -f "${SESSION_FILE:-}" ]]; then
+            octo_session_update '.current_phase = $phase | .phase = $phase | .phase_status = $status | .completed_phases = $completed' \
+                --arg phase "$phase_name" --arg status "completed" --argjson completed "$phase_num" || return 1
         fi
 
         # Handle autonomy checkpoint

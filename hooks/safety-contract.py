@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 
 
@@ -46,6 +47,73 @@ def tool_input(data):
     if not isinstance(value, dict):
         raise ValueError("expected a tool_input object")
     return value
+
+
+def careful_rm(command, cwd):
+    """Only exempt literal, single-command cleanup with every target checked."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = None
+    # Normalize literal shell quoting before recognizing the executable and
+    # flags. GNU rm also accepts unambiguous long-option abbreviations.
+    candidate_text = " ".join(tokens) if tokens is not None else command.replace('"', "").replace("'", "")
+    candidates = re.findall(r"(?<![\w])rm\s+[^\n;&|]*", candidate_text)
+    if not any(re.search(r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--r[a-z]*)(?=\s|$)", flags)
+               and re.search(r"(?:^|\s)(?:-[a-zA-Z]*f[a-zA-Z]*|--f[a-z]*)(?=\s|$)", flags)
+               for flags in candidates):
+        return False
+    if not tokens:
+        return True
+    # Quoted examples in known non-executing commands are ordinary data. Shell
+    # operators or expansions prevent this exemption, even inside quotes.
+    uncertain = any(char in command for char in "$`;|&<>\n")
+    if not uncertain and (tokens[0] in ("echo", "printf", "rg", "grep")
+                          or tokens[:2] == ["git", "commit"]):
+        return False
+    if uncertain or tokens[0] != "rm":
+        return True
+    if any(char in command for char in "*?[{}~"):
+        return True
+    targets = []
+    recursive = force = False
+    operands = False
+    for token in tokens[1:]:
+        if not operands and token == "--":
+            operands = True
+        elif not operands and token.startswith("-"):
+            if token == "--recursive":
+                recursive = True
+            elif token == "--force":
+                force = True
+            elif token.startswith("--"):
+                return True
+            else:
+                recursive |= "r" in token or "R" in token
+                force |= "f" in token
+        else:
+            targets.append(token)
+    if not recursive or not force:
+        return False
+    if not targets:
+        return True
+    safe_dirs = {"node_modules", "dist", ".next", "__pycache__", "build", "coverage", ".turbo"}
+    for target in targets:
+        path = Path(target)
+        if ".." in path.parts:
+            return True
+        if not safe_dirs.intersection(path.parts):
+            return True
+        path = path if path.is_absolute() else Path(cwd) / path
+        # A named cleanup directory may itself be a symlink into user data.
+        within_cleanup = False
+        for parent in reversed((path, *path.parents)):
+            within_cleanup |= parent.name in safe_dirs
+            if within_cleanup and parent.is_symlink():
+                return True
+        if not safe_dirs.intersection(path.resolve().parts):
+            return True
+    return False
 
 
 def patch_paths(command):
@@ -167,6 +235,11 @@ def main():
             value = (data.get("tool_name") if field == "tool_name" else
                      tool_input(data).get("command", data.get("command", "")))
             print(string(value), end="")
+        elif mode == "careful-rm":
+            data = payload()
+            command = string(tool_input(data).get("command", data.get("command", "")))
+            cwd = string(data.get("cwd", os.getcwd()))
+            print("ask" if careful_rm(command, cwd) else "allow")
         elif mode == "freeze":
             freeze(payload(), sys.argv[2])
         else:

@@ -589,7 +589,7 @@ EOF
 
     # v7.19.0 P2.3: Save to cache for reuse
     local cache_key
-    cache_key=$(get_cache_key "$original_prompt")
+    cache_key=$(get_cache_key "$original_prompt") || cache_key=""
 
     local _green="${GREEN:-}"
     local _yellow="${YELLOW:-}"

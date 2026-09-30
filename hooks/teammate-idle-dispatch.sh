@@ -12,7 +12,9 @@ _octo_hook_exit() { local c=$?; if [[ $c -ne 0 ]]; then echo "[hook:$(basename "
 trap _octo_hook_exit EXIT
 
 
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+_SESSION_INPUT=$(cat 2>/dev/null || true)
+octo_session_bind_hook "$_SESSION_INPUT" || exit 0
 
 # Only act if an active workflow session exists
 if [[ ! -f "$SESSION_FILE" ]]; then
@@ -29,16 +31,7 @@ if ! jq -e 'type == "object"' "$SESSION_FILE" >/dev/null 2>&1; then
 fi
 
 _update_session_state() {
-    local filter="$1"
-    shift
-    local session_tmp=""
-    session_tmp=$(mktemp "${SESSION_FILE}.tmp.XXXXXX") || return 1
-    if jq "$@" "$filter" "$SESSION_FILE" > "$session_tmp" 2>/dev/null &&
-       mv "$session_tmp" "$SESSION_FILE" 2>/dev/null; then
-        return 0
-    fi
-    rm -f "$session_tmp"
-    return 1
+    octo_session_update "$@"
 }
 
 CURRENT_PHASE=$(jq -r '.phase // empty' "$SESSION_FILE" 2>/dev/null)
@@ -46,40 +39,24 @@ if [[ -z "$CURRENT_PHASE" ]]; then
     exit 0
 fi
 
-QUEUE_LENGTH=$(jq -r '.agent_queue // [] | length' "$SESSION_FILE" 2>/dev/null)
-[[ "$QUEUE_LENGTH" =~ ^[0-9]+$ ]] || exit 0
-
-if [[ "$QUEUE_LENGTH" -gt 0 ]]; then
-    # Dequeue next task
-    NEXT_TASK=$(jq -r '.agent_queue[0].task // "No task description"' "$SESSION_FILE" 2>/dev/null)
-    NEXT_ROLE=$(jq -r '.agent_queue[0].role // "general"' "$SESSION_FILE" 2>/dev/null)
-
-    # Remove from queue
-    _update_session_state '.agent_queue = .agent_queue[1:]' || exit 0
-
-    # Track idle event in metrics
-    METRICS_DIR="${HOME}/.claude-octopus/metrics"
-    mkdir -p "$METRICS_DIR"
-    echo "{\"event\":\"teammate_idle\",\"phase\":\"$CURRENT_PHASE\",\"dispatched_task\":\"$NEXT_TASK\",\"dispatched_role\":\"$NEXT_ROLE\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
-        >> "${METRICS_DIR}/idle-events.jsonl"
-
-    # Feed task back to teammate via stderr (stdout is not returned to Claude)
-    # Exit code 2 = "don't go idle, here's more work" with stderr as feedback
-    echo "🐙 TeammateIdle: Dispatching queued task to idle agent" >&2
-    echo "Phase: $CURRENT_PHASE | Role: $NEXT_ROLE | Queue remaining: $((QUEUE_LENGTH - 1))" >&2
-    echo "" >&2
-    echo "Your next task: $NEXT_TASK" >&2
-    exit 2
-else
-    # No more work - check if phase should transition
-    COMPLETED=$(jq -r '.phase_tasks.completed // 0' "$SESSION_FILE" 2>/dev/null)
-    TOTAL=$(jq -r '.phase_tasks.total // 0' "$SESSION_FILE" 2>/dev/null)
-
-    if [[ ! "$COMPLETED" =~ ^[0-9]+$ || ! "$TOTAL" =~ ^[0-9]+$ ]]; then
-        exit 0
-    fi
-
-    if [[ "$COMPLETED" -ge "$TOTAL" ]] && [[ "$TOTAL" -gt 0 ]]; then
-        echo "🐙 TeammateIdle: All phase tasks complete. Ready for phase transition."
-    fi
-fi
+# Claim the task under the writer lock. Each event reads only its own claim.
+CLAIM=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
+_update_session_state '
+    if .phase == $phase and .status == "in_progress" and ((.agent_queue // []) | length) > 0 then
+        .idle_claims[$claim] = {task: .agent_queue[0], remaining: ((.agent_queue | length) - 1)} |
+        .agent_queue = .agent_queue[1:]
+    else . end' --arg phase "$CURRENT_PHASE" --arg claim "$CLAIM" || exit 0
+CLAIM_DATA=$(jq -c --arg claim "$CLAIM" '.idle_claims[$claim] // empty' "$SESSION_FILE")
+[[ -n "$CLAIM_DATA" ]] || exit 0
+NEXT_TASK=$(jq -r '.task.task // "No task description"' <<< "$CLAIM_DATA")
+NEXT_ROLE=$(jq -r '.task.role // "general"' <<< "$CLAIM_DATA")
+QUEUE_REMAINING=$(jq -r '.remaining' <<< "$CLAIM_DATA")
+METRICS_DIR="${HOME}/.claude-octopus/metrics"
+{ mkdir -p "$METRICS_DIR" && jq -nc --arg phase "$CURRENT_PHASE" --arg task "$NEXT_TASK" --arg role "$NEXT_ROLE" \
+    '{event: "teammate_idle", phase: $phase, dispatched_task: $task, dispatched_role: $role,
+      timestamp: (now | todate)}' >> "${METRICS_DIR}/idle-events.jsonl"; } 2>/dev/null || true
+echo "TeammateIdle: Dispatching queued task to idle agent" >&2
+echo "Phase: $CURRENT_PHASE | Role: $NEXT_ROLE | Queue remaining: $QUEUE_REMAINING" >&2
+echo "Your next task: $NEXT_TASK" >&2
+_update_session_state 'del(.idle_claims[$claim])' --arg claim "$CLAIM" >/dev/null 2>&1 || true
+exit 2

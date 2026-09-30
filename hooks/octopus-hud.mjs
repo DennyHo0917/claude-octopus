@@ -26,6 +26,7 @@ import { join, dirname } from "node:path";
 import { createInterface } from "node:readline";
 import https from "node:https";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Remote web sessions default to the lightweight bash statusline path to avoid
 // local keychain/OAuth probes and slow terminal-only HUD work.
@@ -39,7 +40,6 @@ if (
 // ── Section A: Constants + Colors ────────────────────────────────────────────
 
 const HOME = homedir();
-const SESSION_FILE = join(HOME, ".claude-octopus", "session.json");
 const CACHE_DIR = join(HOME, ".claude-octopus", ".hud-cache");
 const USAGE_CACHE_PATH = join(CACHE_DIR, "usage-cache.json");
 const VERSION_CACHE_PATH = join(CACHE_DIR, "version-check.json");
@@ -47,7 +47,7 @@ const CONFIG_PATH = join(HOME, ".claude-octopus", ".hud-config.jsonc");
 const CRED_PATH = join(HOME, ".claude", ".credentials.json");
 
 // Octopus plugin version — read from package.json at startup
-const SCRIPT_DIR = dirname(new URL(import.meta.url).pathname);
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 let OCTO_VERSION = "";
 try {
   const pkg = JSON.parse(readFileSync(join(SCRIPT_DIR, "..", "package.json"), "utf-8"));
@@ -756,12 +756,22 @@ function getModelId(stdin) {
 
 // ── Section H: Octopus Workflow Functions ─────────────────────────────────────
 
-function readSession() {
+export function readSession(input = {}) {
   try {
-    if (!existsSync(SESSION_FILE)) return null;
-    const stat = statSync(SESSION_FILE);
+    if (!input.session_id && !process.env.CLAUDE_CODE_SESSION_ID &&
+        !process.env.CLAUDE_SESSION_ID && !process.env.CLAUDE_CODE_SESSION &&
+        !process.env.CODEX_SESSION_ID && !process.env.CODEX_TASK_ID) return null;
+    const payload = { ...input, cwd: input.cwd ?? input.workspace?.current_dir };
+    const sessionFile = execFileSync("/bin/bash", ["-c",
+      'source "$1" || exit 1; input=$(cat); octo_workflow_session_file "$input"',
+      "_", join(SCRIPT_DIR, "../scripts/lib/session-state.sh")], {
+        input: JSON.stringify(payload), encoding: "utf8", timeout: 1000,
+        stdio: ["pipe", "pipe", "ignore"],
+      }).trim();
+    if (!sessionFile || !existsSync(sessionFile)) return null;
+    const stat = statSync(sessionFile);
     if (Date.now() - stat.mtimeMs > 30 * 60 * 1000) return null;
-    return JSON.parse(readFileSync(SESSION_FILE, "utf8"));
+    return JSON.parse(readFileSync(sessionFile, "utf8"));
   } catch {
     return null;
   }
@@ -1003,6 +1013,7 @@ function render(input, session, usage, transcript, latestVersion, config) {
           try {
             const e = JSON.parse(line);
             if (sessionId && e.session !== sessionId) continue;
+            if (e.additive === true) continue;
             totalSaved += e.saved || 0;
             events++;
           } catch { /* skip malformed */ }
@@ -1158,7 +1169,7 @@ async function main() {
     process.exit(0);
   }
 
-  const session = readSession();
+  const session = readSession(input);
   writeContextBridge(input);
 
   const [usage, transcript, latestVersion] = await Promise.all([

@@ -8,6 +8,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "$SCRIPT_DIR/../helpers/test-framework.sh"
 test_suite "v10 routing evaluations"
+export HOME="$TEST_TMP_DIR/routing-home"
+mkdir -p "$HOME"
+unset OCTOPUS_PROVIDERS_CONFIG OCTOPUS_OPUS_MODEL OCTOPUS_CLAUDE_MODEL CLAUDE_MODEL
 
 PROFILE_LIB="$PROJECT_ROOT/scripts/lib/execution-profile.sh"
 FABLE_LIB="$PROJECT_ROOT/scripts/lib/fable5.sh"

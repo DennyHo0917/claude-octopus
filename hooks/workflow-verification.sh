@@ -16,9 +16,11 @@ _octo_hook_exit() { local c=$?; if [[ $c -ne 0 ]]; then echo "[hook:$(basename "
 trap _octo_hook_exit EXIT
 
 
-STATE_DIR="${HOME}/.claude-octopus/.octo"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+_SESSION_INPUT=$(cat 2>/dev/null || true)
+octo_session_bind_hook "$_SESSION_INPUT" || exit 0
+STATE_DIR="$(dirname "$SESSION_FILE")/.octo"
 SNAPSHOT="${STATE_DIR}/pre-compact-snapshot.json"
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
 
 # Check if a workflow was active this session
 workflow=""

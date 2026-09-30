@@ -8,6 +8,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_BASH="${TEST_BASH:-/bin/bash}"
 # shellcheck source=tests/helpers/test-framework.sh
 source "$PROJECT_ROOT/tests/helpers/test-framework.sh"
+source "$PROJECT_ROOT/tests/helpers/workflow-session-fixture.sh"
 test_suite "Installation root safety and handoff redaction"
 work="$TEST_TMP_DIR/install-safety"
 mkdir -p "$work"
@@ -243,9 +244,13 @@ handoff_redaction() {
         redis) sample='rediss://fixture:synthetic-value@localhost/0' ;;
         https) sample='https://fixture:synthetic%2Fvalue@localhost/' ;;
     esac
+    local session_file="" run_id="" project="$handoff_home/project-AKIA0123456789ABCDEF"
     if [[ "$source_kind" == session ]]; then
-        jq -cn --arg value "$sample" --arg safe "$safe" '{workflow:$value,current_phase:$value,status:$value,autonomy:$value,
-            decisions:[$value,$safe],blockers:[$value]}' > "$session/session.json"
+        session_file=$(seed_workflow_session "$PROJECT_ROOT" "$project" "$handoff_home" "$session" handoff-redaction)
+        run_id="$(basename "$(dirname "$session_file")")"
+        jq --arg value "$sample" --arg safe "$safe" '. + {workflow:$value,current_phase:$value,status:$value,autonomy:$value,
+            decisions:[$value,$safe],blockers:[$value]}' "$session_file" > "$session_file.tmp"
+        mv "$session_file.tmp" "$session_file"
     else
         jq -cn --arg value "$sample" --arg safe "$safe" '{current_workflow:$value,current_phase:$value,
             decisions:[{decision:$value},{decision:$safe}],blockers:[{description:$value,status:"active"}]}' > "$state/state.json"
@@ -258,8 +263,10 @@ if ! "$REAL_JQ" -e --arg value "$SYNTHETIC_VALUE" \
 exec /bin/mv "$@"
 EOF
     chmod +x "$handoff_home/bin/mv"
-    env "HOME=$handoff_home" "CLAUDE_PLUGIN_DATA=$session" "OCTOPUS_WORKFLOW_STATE_DIR=$state" \
-        "OCTOPUS_PROJECT_DIR=$handoff_home/project-AKIA0123456789ABCDEF" "PATH=$handoff_home/bin:$PATH" \
+    env "HOME=$handoff_home" "CLAUDE_PLUGIN_DATA=$session" "WORKSPACE_DIR=$session" "OCTOPUS_WORKFLOW_STATE_DIR=$state" \
+        OCTOPUS_HOST=claude CLAUDE_CODE_SESSION_ID=handoff-redaction \
+        "OCTOPUS_SESSION_FILE=$session_file" "OCTOPUS_SESSION_RUN_ID=$run_id" \
+        "OCTOPUS_PROJECT_DIR=$project" "PATH=$handoff_home/bin:$PATH" \
         "REAL_JQ=$(command -v jq)" "SYNTHETIC_VALUE=$sample" \
         "$TEST_BASH" "$PROJECT_ROOT/scripts/handoff.sh" export --json --out "$out/export.json" \
         > "$handoff_home/stdout" 2> "$handoff_home/stderr" || return 1
@@ -277,11 +284,15 @@ done
 
 handoff_failure() {
     local kind="$1" root="$work/handoff-failure-$1" rc=0
+    local session_file="" run_id=""
     mkdir -p "$root/data" "$root/state" "$root/out" "$root/bin"
     printf '{"keep":"existing export"}\n' > "$root/out/export.json"
     cp "$root/out/export.json" "$root/before"
     case "$kind" in
-        session) printf '{invalid' > "$root/data/session.json" ;;
+        session)
+            session_file=$(seed_workflow_session "$PROJECT_ROOT" "$root/project" "$root" "$root/data" handoff-failure)
+            run_id="$(basename "$(dirname "$session_file")")"
+            printf '{invalid' > "$session_file" ;;
         state) printf '{invalid' > "$root/state/state.json" ;;
         sanitizer)
             cat > "$root/bin/jq" <<'EOF'
@@ -292,7 +303,9 @@ EOF
             chmod +x "$root/bin/jq"
             ;;
     esac
-    env "HOME=$root" "CLAUDE_PLUGIN_DATA=$root/data" "OCTOPUS_WORKFLOW_STATE_DIR=$root/state" \
+    env "HOME=$root" "CLAUDE_PLUGIN_DATA=$root/data" "WORKSPACE_DIR=$root/data" "OCTOPUS_WORKFLOW_STATE_DIR=$root/state" \
+        OCTOPUS_HOST=claude CLAUDE_CODE_SESSION_ID=handoff-failure \
+        "OCTOPUS_SESSION_FILE=$session_file" "OCTOPUS_SESSION_RUN_ID=$run_id" \
         "OCTOPUS_PROJECT_DIR=$root/project" "REAL_JQ=$(command -v jq)" "PATH=$root/bin:$PATH" \
         "$TEST_BASH" "$PROJECT_ROOT/scripts/handoff.sh" export --json --out "$root/out/export.json" \
         > "$root/stdout" 2> "$root/stderr" || rc=$?

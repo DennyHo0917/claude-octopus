@@ -188,7 +188,9 @@ fi
 
 test_case "openai-compatible-agent reads valid memory cache and clears unsafe entries"
 cache_key="MC_openai_compatible_agent_A_openai_compatible_agent_P_memcache_R__M_standard_RP_off_TC_none_C_no_config"
-cache_var="_OCTO_MODEL_CACHE_${cache_key}"
+caps="${SUPPORTS_OPUS_5_5:-}_${SUPPORTS_OPUS_5:-}_${SUPPORTS_OPUS_4_8:-}_${SUPPORTS_OPUS_4_7:-}_${SUPPORTS_SONNET_5:-}"
+caps="${caps//[^a-zA-Z0-9_]/_}"
+cache_var="_OCTO_MODEL_CACHE_${cache_key}_CAP_${caps}"
 out_file="$TEST_TMP_DIR/openai-compatible-memory-cache-model.out"
 printf -v "$cache_var" "%s" "vendor/model-fast"
 if ! HOME="$TEST_HOME" USER="octo-test-$$" CLAUDE_CODE_SESSION="compat-memcache" resolve_octopus_model openai-compatible-agent openai-compatible-agent memcache "" >"$out_file" 2>/dev/null; then

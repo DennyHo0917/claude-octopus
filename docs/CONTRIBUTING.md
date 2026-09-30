@@ -21,6 +21,7 @@ Thanks for your interest in contributing to Claude Octopus! This document provid
 
 - Bash 3.2+ (bash 3.x compatible — no associative arrays)
 - jq (for JSON processing)
+- Python 3 with the standard `fcntl` module for runtime state writes
 - Codex CLI, Antigravity CLI (`agy`), Copilot CLI, Ollama (all optional — for multi-provider testing)
 
 ### Validate Your Changes

@@ -27,7 +27,7 @@ if [[ -r "$ACTIVATION_LIB" ]]; then
     # shellcheck source=../scripts/lib/hook-activation.sh
     source "$ACTIVATION_LIB" 2>/dev/null || true
     PROFILE_NAME="$(octo_hook_profile)"
-    octo_hook_profile_allows "post-tool-dispatch" && PROFILE_POST_TOOL=true
+    octo_hook_profile_allows "post-tool-dispatch" "$PROFILE_NAME" && PROFILE_POST_TOOL=true
 fi
 if [[ "$PROFILE_POST_TOOL" != true ]]; then
     case "${OCTOPUS_CONTEXT_AWARENESS:-off}:${OCTO_STRATEGY_ROTATION:-off}:${OCTOPUS_COMPRESS_ENABLED:-false}" in

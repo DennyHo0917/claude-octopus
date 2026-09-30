@@ -24,18 +24,18 @@ trap _octo_hook_exit EXIT
 
 # Read stdin (required by hook protocol — drain to prevent SIGPIPE)
 if command -v timeout &>/dev/null; then
-    timeout 3 cat > /dev/null 2>&1 || true
+    INPUT=$(timeout 3 cat 2>/dev/null || true)
 else
-    cat > /dev/null 2>&1 || true
+    INPUT=$(cat 2>/dev/null || true)
 fi
-
-SESSION="${CLAUDE_SESSION_ID:-unknown}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib" && pwd -P)/session-state.sh" || exit 0
+SESSION=$(octo_resolve_session_id "" "$INPUT" || true)
 # Exit if session ID unknown — cannot safely identify the right bridge file
-[[ "$SESSION" == "unknown" ]] && exit 0
+[[ -z "$SESSION" ]] && exit 0
 BRIDGE="/tmp/octopus-ctx-${SESSION}.json"
 DEBOUNCE_FILE="/tmp/octopus-ctx-debounce-${SESSION}.count"
 LAST_SEVERITY_FILE="/tmp/octopus-ctx-severity-${SESSION}.level"
-SESSION_FILE="${HOME}/.claude-octopus/session.json"
+octo_session_bind_hook "$INPUT" || exit 0
 
 # No bridge file = statusline hasn't run yet, skip silently
 [[ -f "$BRIDGE" ]] || exit 0
@@ -49,7 +49,8 @@ USED_PCT=$(BRIDGE_PATH="$BRIDGE" python3 -c "
 import json, os
 try:
     d = json.load(open(os.environ['BRIDGE_PATH']))
-    print(d.get('used_pct', 0))
+    value = d.get('used_pct', 0)
+    print(max(0, min(100, int(float(value)))))
 except:
     print(0)
 " 2>/dev/null) || USED_PCT=0
@@ -69,13 +70,20 @@ fi
 
 # Debounce: increment counter, fire every 5 tool calls
 COUNT=0
-[[ -f "$DEBOUNCE_FILE" ]] && COUNT=$(<"$DEBOUNCE_FILE" 2>/dev/null) || COUNT=0
+if [[ -r "$DEBOUNCE_FILE" ]]; then
+    IFS= read -r COUNT < "$DEBOUNCE_FILE" || true
+fi
+[[ "$COUNT" =~ ^[0-9]{1,8}$ ]] || COUNT=0
+COUNT=$((10#$COUNT))
 COUNT=$((COUNT + 1))
 printf '%s' "$COUNT" > "$DEBOUNCE_FILE" 2>/dev/null || true
 
 # Check for severity escalation (bypasses debounce)
 LAST_SEVERITY=""
-[[ -f "$LAST_SEVERITY_FILE" ]] && LAST_SEVERITY=$(<"$LAST_SEVERITY_FILE" 2>/dev/null) || true
+if [[ -r "$LAST_SEVERITY_FILE" ]]; then
+    IFS= read -r LAST_SEVERITY < "$LAST_SEVERITY_FILE" || true
+fi
+case "$LAST_SEVERITY" in WARNING|CRITICAL|AUTO_COMPACT) ;; *) LAST_SEVERITY="" ;; esac
 ESCALATED=false
 if [[ "$SEVERITY" == "AUTO_COMPACT" && "$LAST_SEVERITY" != "AUTO_COMPACT" ]]; then
     ESCALATED=true

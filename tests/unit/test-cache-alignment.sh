@@ -34,9 +34,18 @@ done
 
 # ── v10 runtime cache truth ──────────────────────────────────────────────────
 
+cache_project="$TEST_TMP_DIR/cache-project"
+mkdir -p "$cache_project" "$TEST_TMP_DIR/cache-home"
+git -C "$cache_project" init -q
+git -C "$cache_project" -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm fixture
+cache_dir_for() {
+  HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$1" \
+    bash -c 'source "$1"; octo_probe_cache_dir' _ "$SEMANTIC_CACHE_SH"
+}
+
 test_case "session source without WORKSPACE_DIR never resolves a root cache path"
 set +e
-cache_source_output=$(env -i HOME="$TEST_TMP_DIR/cache-home" PATH="$PATH" \
+cache_source_output=$(env -i HOME="$TEST_TMP_DIR/cache-home" PATH="$PATH" PROJECT_ROOT="$cache_project" \
   bash -c 'set -u; source "$1"; octo_probe_cache_dir' _ "$SESSION_SH" 2>&1)
 cache_source_rc=$?
 set -e
@@ -52,10 +61,11 @@ printf 'not a directory\n' > "$cache_failure_root"
 cache_source_file="$TEST_TMP_DIR/cache-source.md"
 printf 'usable synthesis\n' > "$cache_source_file"
 set +e
-cache_failure_output=$(WORKSPACE_DIR="$cache_failure_root" CACHE_TTL=3600 bash -c '
+cache_failure_output=$(HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$cache_failure_root" CACHE_TTL=3600 bash -c '
   log() { :; }
   source "$1"
-  save_to_cache fixture "$2"
+  cd "$PROJECT_ROOT"
+  save_to_cache "$(get_cache_key fixture)" "$2"
 ' _ "$SEMANTIC_CACHE_SH" "$cache_source_file" 2>&1)
 cache_failure_rc=$?
 set -e
@@ -67,20 +77,23 @@ fi
 
 test_case "a failed metadata install removes the uncommitted cache result"
 partial_root="$TEST_TMP_DIR/cache-partial"
-mkdir -p "$partial_root/.cache/probe-results"
+partial_dir="$(cache_dir_for "$partial_root")"
+mkdir -p "$partial_dir"
+partial_key=$(HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$partial_root" bash -c 'source "$1"; get_cache_key fixture' _ "$SEMANTIC_CACHE_SH")
 set +e
-partial_output=$(WORKSPACE_DIR="$partial_root" CACHE_TTL=3600 bash -c '
+partial_output=$(HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$partial_root" CACHE_TTL=3600 bash -c '
   log() { :; }
   source "$1"
   mv() {
     [[ "${2:-}" == *.meta ]] && return 1
     command mv "$@"
   }
-  save_to_cache fixture "$2"
+  cd "$PROJECT_ROOT"
+  save_to_cache "$(get_cache_key fixture)" "$2"
 ' _ "$SEMANTIC_CACHE_SH" "$cache_source_file" 2>&1)
 partial_rc=$?
 set -e
-if [[ "$partial_rc" -ne 0 && ! -e "$partial_root/.cache/probe-results/fixture.md" && ! -e "$partial_root/.cache/probe-results/fixture.meta" ]]; then
+if [[ "$partial_rc" -ne 0 && ! -e "$partial_dir/$partial_key.md" && ! -e "$partial_dir/$partial_key.meta" ]]; then
   test_pass
 else
   test_fail "rc=$partial_rc files=$(find "$partial_root/.cache/probe-results" -maxdepth 1 -type f -print | tr '\n' ' ') output=$partial_output"
@@ -88,14 +101,17 @@ fi
 
 test_case "semantic lookup ignores orphaned bigram sidecars"
 orphan_root="$TEST_TMP_DIR/cache-orphan"
-mkdir -p "$orphan_root/.cache/probe-results"
-printf '%s\n' 'same prompt' > "$orphan_root/.cache/probe-results/orphan.bigrams"
+orphan_dir="$(cache_dir_for "$orphan_root")"
+mkdir -p "$orphan_dir"
+orphan_key=$(HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$orphan_root" bash -c 'source "$1"; get_cache_key "same prompt"' _ "$SEMANTIC_CACHE_SH")
+printf '%s\n' 'same prompt' > "$orphan_dir/$orphan_key.bigrams"
 set +e
-orphan_output=$(WORKSPACE_DIR="$orphan_root" OCTOPUS_SEMANTIC_CACHE=true \
+orphan_output=$(HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$orphan_root" OCTOPUS_SEMANTIC_CACHE=true \
   bash -c '
     log() { :; }
     source "$1"
     bigram_similarity() { printf "1\n"; }
+    cd "$PROJECT_ROOT"
     check_cache_semantic "same prompt"
   ' _ "$SEMANTIC_CACHE_SH" 2>&1)
 orphan_rc=$?
@@ -108,18 +124,19 @@ fi
 
 test_case "cache expiry removes semantic sidecars"
 expired_root="$TEST_TMP_DIR/cache-expired"
-mkdir -p "$expired_root/.cache/probe-results"
-printf '%s\n' 'expired result' > "$expired_root/.cache/probe-results/expired.md"
-printf '%s\n' '0' > "$expired_root/.cache/probe-results/expired.meta"
-printf '%s\n' 'expired prompt' > "$expired_root/.cache/probe-results/expired.bigrams"
-WORKSPACE_DIR="$expired_root" CACHE_TTL=1 bash -c '
+expired_dir="$(cache_dir_for "$expired_root")"
+mkdir -p "$expired_dir"
+printf '%s\n' 'expired result' > "$expired_dir/expired.md"
+printf '%s\n' '0' > "$expired_dir/expired.meta"
+printf '%s\n' 'expired prompt' > "$expired_dir/expired.bigrams"
+HOME="$TEST_TMP_DIR/cache-home" PROJECT_ROOT="$cache_project" WORKSPACE_DIR="$expired_root" CACHE_TTL=1 bash -c '
   log() { :; }
   source "$1"
   cleanup_cache
 ' _ "$SEMANTIC_CACHE_SH"
-if [[ ! -e "$expired_root/.cache/probe-results/expired.md" && \
-      ! -e "$expired_root/.cache/probe-results/expired.meta" && \
-      ! -e "$expired_root/.cache/probe-results/expired.bigrams" ]]; then
+if [[ ! -e "$expired_dir/expired.md" && \
+      ! -e "$expired_dir/expired.meta" && \
+      ! -e "$expired_dir/expired.bigrams" ]]; then
   test_pass
 else
   test_fail "expired cache entry left semantic sidecars"

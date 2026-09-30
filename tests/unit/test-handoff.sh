@@ -14,6 +14,8 @@ SESSION_END="$PROJECT_ROOT/hooks/session-end.sh"
 RESUME_SKILL="$(resolve_claude_skill_path "skill-resume")"
 GENERATED_RESUME_SKILL="$PROJECT_ROOT/skills/skill-resume/SKILL.md"
 
+source "$SCRIPT_DIR/../helpers/workflow-session-fixture.sh"
+
 pass() { test_case "$1"; test_pass; }
 fail() { test_case "$1"; test_fail "${2:-$1}"; }
 
@@ -23,7 +25,7 @@ run_as_hook() {
     (cd "$project" && env -u CLAUDE_OCTOPUS_WORKSPACE -u OCTOPUS_WORKFLOW_STATE_DIR \
         -u OCTOPUS_STATE_PROJECT_ROOT \
         "HOME=$home" "CLAUDE_PLUGIN_ROOT=$PROJECT_ROOT" "CLAUDE_PLUGIN_DATA=$plugin_data" \
-        "CLAUDE_PROJECT_DIR=$project" "CLAUDE_SESSION_ID=test-session" \
+        "CLAUDE_PROJECT_DIR=$project" "CLAUDE_SESSION_ID=test-session" "CLAUDE_CODE_SESSION_ID=test-session" "OCTOPUS_HOST=claude" \
         "$@" </dev/null)
 }
 
@@ -146,9 +148,9 @@ test_case "write-handoff reads active agent from canonical progress.json"
 TEST_ROOT="$TEST_TMP_DIR/handoff-fixture"
 PLUGIN_DATA="$TEST_ROOT/plugin-data"
 mkdir -p "$TEST_ROOT/home/.claude-octopus" "$PLUGIN_DATA" "$TEST_ROOT/work/.octo"
-cat > "$TEST_ROOT/home/.claude-octopus/session.json" <<'EOF'
-{"current_phase":"develop","workflow":"embrace","status":"running"}
-EOF
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$TEST_ROOT/work" "$TEST_ROOT/home" "$PLUGIN_DATA" test-session)
+jq '.current_phase = "develop"' "$state_file" > "$TEST_ROOT/updated-state.json"
+mv "$TEST_ROOT/updated-state.json" "$state_file"
 cat > "$PLUGIN_DATA/progress.json" <<'EOF'
 {"agents":[{"name":"codex","task_id":"task-1","status":"running"}]}
 EOF
@@ -163,9 +165,7 @@ test_case "pre-compact hook writes the relocated handoff"
 HOOK_ROOT="$TEST_TMP_DIR/hook-fixture"
 mkdir -p "$HOOK_ROOT/home/.claude-octopus" "$HOOK_ROOT/plugin-data" "$HOOK_ROOT/project"
 git -C "$HOOK_ROOT/project" init -q
-cat > "$HOOK_ROOT/home/.claude-octopus/session.json" <<'EOF'
-{"current_phase":"init","workflow":"embrace","status":"running"}
-EOF
+state_file=$(seed_workflow_session "$PROJECT_ROOT" "$HOOK_ROOT/project" "$HOOK_ROOT/home" "$HOOK_ROOT/plugin-data" test-session)
 run_as_hook "$HOOK_ROOT/project" "$HOOK_ROOT/home" "$HOOK_ROOT/plugin-data" \
     bash "$PRE_COMPACT" >/dev/null 2>&1 || true
 hook_handoff="$(resume_handoff_path "$HOOK_ROOT/project" "$HOOK_ROOT/home")"

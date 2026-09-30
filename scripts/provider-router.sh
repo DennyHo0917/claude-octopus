@@ -140,6 +140,14 @@ record_provider_success() {
     fi
 }
 
+# Reject corrupt timestamps before Bash arithmetic interprets their contents.
+_octo_read_cooldown_start() {
+    local value
+    IFS= read -r value < "$1" || [[ -n "${value:-}" ]] || return 1
+    [[ "$value" =~ ^[0-9]{1,10}$ ]] || return 1
+    printf '%s\n' "$((10#$value))"
+}
+
 # Check if a provider is available (not in cooldown)
 # Args: provider
 # Returns: 0 if available, 1 if in cooldown
@@ -149,10 +157,16 @@ is_provider_available() {
 
     [[ ! -f "$cooldown_file" ]] && return 0
 
-    local cooldown_start
-    cooldown_start=$(<"$cooldown_file" 2>/dev/null) || return 0
-    local now
+    local cooldown_start now repaired
     now=$(date +%s)
+    if ! cooldown_start=$(_octo_read_cooldown_start "$cooldown_file" 2>/dev/null) || [[ "$cooldown_start" -gt "$now" ]]; then
+        log "WARN" "Invalid cooldown timestamp for $provider; restarting the standard cooldown" 2>/dev/null || true
+        repaired=$(mktemp "${cooldown_file}.tmp.XXXXXX") || return 1
+        if ! { printf '%s\n' "$now" > "$repaired" && mv "$repaired" "$cooldown_file"; }; then
+            rm -f "$repaired"
+        fi
+        return 1
+    fi
     local elapsed=$((now - cooldown_start))
 
     if [[ $elapsed -ge $OCTO_CB_COOLDOWN_SECS ]]; then
@@ -200,7 +214,10 @@ get_circuit_breaker_status() {
 
         if [[ -f "$cooldown_file" ]]; then
             local cooldown_start
-            cooldown_start=$(<"$cooldown_file" 2>/dev/null) || continue
+            if ! cooldown_start=$(_octo_read_cooldown_start "$cooldown_file" 2>/dev/null); then
+                status+="  $provider: OPEN (invalid cooldown timestamp)\n"
+                continue
+            fi
             local elapsed=$((now - cooldown_start))
             if [[ $elapsed -lt $OCTO_CB_COOLDOWN_SECS ]]; then
                 state="OPEN"

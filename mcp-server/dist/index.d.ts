@@ -24,6 +24,15 @@
  */
 import { execFile } from "node:child_process";
 declare const execFileAsync: typeof execFile.__promisify__;
+/** Editor context injected by IDE extensions via octopus_set_editor_context */
+interface EditorContext {
+    filename?: string;
+    selection?: string;
+    cursorLine?: number;
+    languageId?: string;
+    workspaceRoot?: string;
+}
+export declare function setEditorContext(context: EditorContext): Promise<void>;
 export declare function runOrchestrate(command: string, prompt: string, projectRoot: string, flags?: string[], postFlags?: string[], executor?: typeof execFileAsync): Promise<{
     text: string;
     isError: boolean;
